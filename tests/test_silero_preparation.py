@@ -47,6 +47,9 @@ class SileroPreparationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             project('Она была.', 'Он б+ыл.')
 
+    def test_silero_yo_is_accent_only_not_letter_change(self):
+        self.assertEqual(project('Елка зеленая.', '+Ёлка зел+ёная.'), 'Е́лка зеле́ная.')
+
     def test_bad_marks(self):
         with self.assertRaises(ValueError):
             acute('бы+ла')

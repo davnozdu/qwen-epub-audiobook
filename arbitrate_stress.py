@@ -14,6 +14,8 @@ def disputes(manifest):
         contexts[s['paragraph_id']].append(s['tts_normalized'])
     rows = []
     for s in manifest['segments']:
+        if s.get('tts_silero_valid') is False:
+            continue
         author = WORD.findall(s['tts_normalized'])
         dictionary = WORD.findall(s['tts_dictionary_text'])
         silero = WORD.findall(s['tts_silero_text'])

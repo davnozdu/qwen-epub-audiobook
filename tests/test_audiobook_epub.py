@@ -136,5 +136,21 @@ class BookTests(unittest.TestCase):
                 self.assertEqual(archive.read("EPUB/audio/book.m4a"), original_audio)
 
 
+class FixedRangeTests(unittest.TestCase):
+    def test_prefix_estimated_original_measured_end_preserved(self):
+        segments = [dict(id=f's{i}', paragraph_id=f'p{i}', text='abcdefghijklmno', pause_after_ms=200)
+                    for i in range(1, 5)]
+        rows = [dict(segment_id='s2', text=segments[1]['text'], audio_start=0, audio_end=5)]
+        selected, seconds = a.select_range({'segments': segments}, rows, 'p1', 'p3')
+        self.assertEqual([s['id'] for s in selected], ['s1', 's2', 's3'])
+        self.assertAlmostEqual(seconds, 5 + 30 / 14 + .6)
+        selected[0]['text'] = 'changed'
+        self.assertEqual(segments[0]['text'], 'abcdefghijklmno')
+        with self.assertRaises(ValueError):
+            a.select_range({'segments': segments}, [], 'p3', 'p1')
+        with self.assertRaises(ValueError):
+            a.select_range({'segments': segments}, [], 'p1', 'missing')
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -24,8 +24,10 @@ if ! (
     --stress-marks keep --whole-book --out "$TASK_PROJECT/audio" || exit 1
   "$TASK_PYTHON" -u "$TASK_ROOT/normalize_book_audio.py" \
     --audio-dir "$TASK_PROJECT/audio" --out "$TASK_PROJECT/audio-normalized" || exit 1
+  "$TASK_PYTHON" -u "$TASK_ROOT/mix_book_music.py" \
+    --audio-dir "$TASK_PROJECT/audio-normalized" --out "$TASK_PROJECT/audio-music" --volume-percent 5 || exit 1
   "$TASK_PYTHON" -u "$TASK_ROOT/audiobook_epub.py" package \
-    --manifest "$TASK_PROJECT/source/manifest.json" --audio-dir "$TASK_PROJECT/audio-normalized" --out "$TASK_PROJECT/result"
+    --manifest "$TASK_PROJECT/source/manifest.json" --audio-dir "$TASK_PROJECT/audio-music" --out "$TASK_PROJECT/result"
 ) 2>&1 | tee "$TASK_PROJECT/run.log"; then
   echo "Ошибка. Журнал: $TASK_PROJECT/run.log"
   read "?Нажмите Enter, чтобы закрыть окно."

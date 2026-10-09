@@ -19,3 +19,7 @@ runtime-downloads/
 credentials*
 secrets*
 data/stress/
+books/
+results/
+.cache/
+demo/

@@ -69,15 +69,17 @@ def project(original, predicted):
     """Transfer only accents, retaining ALL original letters and punctuation."""
     source = list(WORD.finditer(original))
     target = [acute(m.group()) for m in MARKED_WORD.finditer(predicted)]
-    plain = lambda w: w.replace("\u0301", "")
+    plain = lambda w: w.replace("\u0301", "").replace('ё','е').replace('Ё','Е')
     if [plain(m.group()).lower() for m in source] != [plain(w).lower() for w in target]:
         raise ValueError("Silero изменил слова: результат не принят")
     parts, end = [], 0
     for match, marked in zip(source, target):
         word = match.group()
         replacement = word
-        if "\u0301" not in word and "ё" not in word.lower() and "\u0301" in marked:
-            position = marked.index("\u0301")
+        if "\u0301" not in word and "ё" not in word.lower() and ("\u0301" in marked or 'ё' in marked.lower()):
+            # Some Silero exceptions restore ё even with put_yo=False. Extract
+            # its stress position, never transfer changed letters into the book.
+            position = marked.index("\u0301") if '\u0301' in marked else marked.lower().index('ё')+1
             if sum(c.lower() in VOWELS for c in word) > 1:
                 replacement = word[:position] + "\u0301" + word[position:]
         parts.extend([original[end:match.start()], replacement])
@@ -125,6 +127,7 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
     homographs.update(key for key, variants in dictionary.data.get("gram", {}).items()
                       if len(set(variants.values())) > 1)
     changes = []
+    fallbacks = []
     decisions_count = defaultdict(int)
     start = time.monotonic()
     for number, segments in enumerate(groups.values(), 1):
@@ -134,13 +137,21 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
         clean = original.replace("\u0301", "")
         prediction = accentor(clean, put_yo=False, put_yo_homo=False,
                               stress_single_vowel=False)
-        projected = project(original, prediction)
+        try:
+            projected = project(original, prediction)
+            silero_valid = True
+        except ValueError as exc:
+            projected = ' '.join(s['tts_dictionary_text'] for s in segments)
+            silero_valid = False
+            fallbacks.append({'paragraph_id':segments[0]['paragraph_id'],'reason':str(exc)})
+            print(f"Silero: сохранён словарный абзац {segments[0]['paragraph_id']} ({exc})",flush=True)
         # Character offsets differ only by inserted acute marks. Split back by
         # original word counts, not by Silero punctuation or sentence splitting.
         words = iter(WORD.findall(projected))
         for segment in segments:
             independent = WORD.sub(lambda _: next(words), segment["tts_normalized"])
             segment["tts_silero_text"] = independent
+            segment['tts_silero_valid'] = silero_valid
             if strategy == "hybrid":
                 text, decisions = hybrid_text(segment["tts_normalized"], segment["tts_dictionary_text"], independent, homographs)
                 for decision in decisions:
@@ -164,6 +175,7 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
         stress_review=[], silero_seconds=round(time.monotonic()-start, 3),
         silero_policy="independent full-paragraph prediction; original accents/letters preserved; yo restoration disabled",
         stress_strategy=strategy,
+        silero_fallbacks=fallbacks,
         hybrid_policy="dictionary for marked unambiguous words; Silero for known homographs and unmarked words; author accents protected" if strategy == "hybrid" else None,
     )
     check(result)
@@ -172,6 +184,7 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
               "dictionary_acute_marks": sum(s["tts_dictionary_text"].count("\u0301") for s in result["segments"]),
               "final_acute_marks": sum(s["tts_text"].count("\u0301") for s in result["segments"]),
               "word_sources": dict(decisions_count),
+              "silero_fallbacks": fallbacks,
               "different_words": len(changes), "changes": changes,
               "inference_seconds": result["speech_preparation"]["silero_seconds"],
               "warning": "Disagreement is not proof of error; no audio generated."}

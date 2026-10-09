@@ -104,6 +104,26 @@ def select_excerpt(manifest, timeline, seconds, start):
     return deepcopy(selected[:count]), duration
 
 
+def select_range(manifest, timeline, start, end):
+    """Inclusive whole-paragraph range; estimates only unmeasured segments."""
+    paragraphs = list(grouped(manifest['segments'], 'paragraph_id'))
+    if start not in paragraphs or end not in paragraphs:
+        raise ValueError('Начальный или конечный абзац отсутствует')
+    first, last = paragraphs.index(start), paragraphs.index(end)
+    if first > last:
+        raise ValueError('Конец фрагмента расположен раньше начала')
+    included = set(paragraphs[first:last + 1])
+    selected = [s for s in manifest['segments'] if s['paragraph_id'] in included]
+    measured = {row['segment_id']: row for row in timeline}
+    duration = 0.0
+    for segment in selected:
+        row = measured.get(segment['id'])
+        if row and row['text'] != segment['text']:
+            raise ValueError('Измерения относятся к другому тексту')
+        duration += (row['audio_end'] - row['audio_start'] if row else len(segment['text']) / 14) + segment['pause_after_ms'] / 1000
+    return deepcopy(selected), duration
+
+
 def boundary_pause(segment, next_segment=None, sentence_ms=450, paragraph_ms=800):
     tail = re.sub(r'[\s»”"\'’\)\]\}—–-]+$', '', segment["text"])
     paragraph_end = next_segment is None or next_segment["paragraph_id"] != segment["paragraph_id"]
@@ -220,13 +240,16 @@ def build_text_epub(manifest, destination):
     validate_epub(destination, manifest)
 
 
-def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highlight="sentence", sentence_ms=450, paragraph_ms=800):
+def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highlight="sentence", sentence_ms=450, paragraph_ms=800, end=None):
     manifest = load(manifest_path)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     original_book = deepcopy(manifest["book"])
     duration = None
-    if seconds is not None:
+    if end is not None:
+        manifest['segments'], duration = select_range(manifest, load(timing)['segments'] if timing else [], start, end)
+        manifest['book']['title'] += ' — тестовый фрагмент'
+    elif seconds is not None:
         manifest["segments"], duration = select_excerpt(manifest, load(timing)["segments"] if timing else [], seconds, start)
         manifest["book"]["title"] += " — тестовый фрагмент"
     used = {s["speaker"] for s in manifest["segments"]}
@@ -246,7 +269,7 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
         segment["order"] = i
     manifest["origin_book"] = original_book
     manifest["excerpt"] = {"target_seconds": seconds, "expected_seconds": duration,
-        "duration_basis": "measured first test" if timing else "estimated 14 characters per second",
+        "duration_basis": "measured where available; remainder estimated at 14 characters per second" if end else ("measured first test" if timing else "estimated 14 characters per second"),
         "first_paragraph": manifest["segments"][0]["paragraph_id"], "last_paragraph": manifest["segments"][-1]["paragraph_id"]}
     text_epub = out / "book-text.epub"
     build_text_epub(manifest, text_epub)
@@ -459,6 +482,7 @@ def main():
     prep.add_argument("--seconds", type=float)
     prep.add_argument("--timing")
     prep.add_argument("--start-paragraph", default="p00058")
+    prep.add_argument("--end-paragraph", help="Включительный конец фиксированного фрагмента")
     prep.add_argument("--highlight", choices=["sentence", "fragment"], default="sentence")
     prep.add_argument("--sentence-pause-ms", type=int, default=450)
     prep.add_argument("--paragraph-pause-ms", type=int, default=800)
@@ -477,7 +501,7 @@ def main():
             if not 100 <= args.sentence_pause_ms <= 2000 or not args.sentence_pause_ms <= args.paragraph_pause_ms <= 4000:
                 raise ValueError("Некорректные паузы")
             prepare(args.manifest, args.out, args.seconds, args.timing, args.start_paragraph, args.highlight,
-                    args.sentence_pause_ms, args.paragraph_pause_ms)
+                    args.sentence_pause_ms, args.paragraph_pause_ms, args.end_paragraph)
         elif args.command == "package":
             package(args.manifest, args.audio_dir, args.out)
         else:

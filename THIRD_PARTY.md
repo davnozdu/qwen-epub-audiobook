@@ -21,9 +21,19 @@ Source supplied at `/Users/davnozdu/Downloads/supertonic`, under
 `supertonic-android/app/src/main/java/com/brahmadeo/supertonic/tts/`;
 source file SHA-256 values are embedded in that JSON for traceability.
 Android/Silero neural binaries, weights and English currency rules are not bundled.
-Local static dictionaries are imported separately and excluded from Git.
+The runnable kit includes the user-supplied portable static dictionary in
+`resources/stress_dictionary.json`; its provenance identifies the original
+Supertonic/Silero inputs. Runtime copies in `data/stress` are excluded from Git.
 The optional full SACC dictionary is from
 https://github.com/davnozdu/supertonic-dictionaries/releases/tag/russian-v1.1
 (179200764 bytes, SHA-256 a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27).
 Its data is not redistributed in this repository. No additional license grant
 is asserted for user-owned or separately downloaded dictionary data.
+
+## Background music
+
+The user requested inclusion of their first MyTTS reading-music track:
+`resources/Lamplight_and_Paper.mp3`, from their local `Downloads/MusicRead`.
+Size and SHA256 match their public `reading-music-v1` catalog/release:
+https://github.com/davnozdu/supertonic-android/releases/tag/reading-music-v1.
+No new license or third-party redistribution rights are asserted by this project.

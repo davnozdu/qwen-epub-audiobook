@@ -39,8 +39,10 @@ if ! (
     --stress-marks keep --whole-book --out "$TASK_OUT/audio" || exit 1
   "$TASK_PYTHON" -u "$TASK_PROJECT/normalize_book_audio.py" \
     --audio-dir "$TASK_OUT/audio" --out "$TASK_OUT/audio-normalized" || exit 1
+  "$TASK_PYTHON" -u "$TASK_PROJECT/mix_book_music.py" \
+    --audio-dir "$TASK_OUT/audio-normalized" --out "$TASK_OUT/audio-music" --volume-percent 5 || exit 1
   "$TASK_PYTHON" -u "$TASK_PROJECT/audiobook_epub.py" package \
-    --manifest "$TASK_OUT/source/manifest.json" --audio-dir "$TASK_OUT/audio-normalized" --out "$TASK_OUT/result"
+    --manifest "$TASK_OUT/source/manifest.json" --audio-dir "$TASK_OUT/audio-music" --out "$TASK_OUT/result"
 ) 2>&1 | tee "$TASK_OUT/run.log"; then
   echo "Ошибка. Журнал: $TASK_OUT/run.log"
   read "?Нажмите Enter, чтобы закрыть окно."
@@ -48,7 +50,7 @@ if ! (
 fi
 open "$TASK_OUT/result"
 if [[ "${1:-}" != "--full" ]]; then
-  open -a "QuickTime Player" "$TASK_OUT/audio-normalized/sample.mp3" || echo "Для прослушивания откройте: $TASK_OUT/audio-normalized/sample.mp3"
+  open -a "QuickTime Player" "$TASK_OUT/audio-music/sample.mp3" || echo "Для прослушивания откройте: $TASK_OUT/audio-music/sample.mp3"
 fi
 echo "Готово: book.m4b и book-read-along.epub. Модели выгружены, временные голоса удалены."
 read "?Нажмите Enter, чтобы закрыть окно."
