@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 import posixpath
+import re
 import subprocess
 import shutil
 import tempfile
@@ -103,7 +104,21 @@ def select_excerpt(manifest, timeline, seconds, start):
     return deepcopy(selected[:count]), duration
 
 
-def sentence_segments(manifest):
+def boundary_pause(segment, next_segment=None, sentence_ms=450, paragraph_ms=800):
+    tail = re.sub(r'[\s»”"\'’\)\]\}—–-]+$', '', segment["text"])
+    paragraph_end = next_segment is None or next_segment["paragraph_id"] != segment["paragraph_id"]
+    if paragraph_end:
+        return paragraph_ms
+    if tail.endswith(("…", "...")):
+        return max(sentence_ms, 700)
+    if tail.endswith(("?", "!")):
+        return max(sentence_ms, 600)
+    if tail.endswith("."):
+        return sentence_ms
+    return 180 if next_segment["speaker"] != segment["speaker"] else 100
+
+
+def sentence_segments(manifest, sentence_ms=450, paragraph_ms=800):
     from razdel import sentenize
     from types import SimpleNamespace
     result = []
@@ -145,6 +160,8 @@ def sentence_segments(manifest):
             row["split_boundary"] = "sentence"
             row["order"] = len(result)
             result.append(row)
+    for i, row in enumerate(result):
+        row["pause_after_ms"] = boundary_pause(row, result[i + 1] if i + 1 < len(result) else None, sentence_ms, paragraph_ms)
     return result
 
 
@@ -203,7 +220,7 @@ def build_text_epub(manifest, destination):
     validate_epub(destination, manifest)
 
 
-def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highlight="sentence"):
+def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highlight="sentence", sentence_ms=450, paragraph_ms=800):
     manifest = load(manifest_path)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -218,9 +235,12 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
         selected_paragraphs = {s["paragraph_id"] for s in manifest["segments"]}
         manifest["paragraph_texts"] = {p["id"]: p["text"] for p in load(source_json)["paragraphs"] if p["id"] in selected_paragraphs}
     if highlight == "sentence":
-        manifest["segments"] = sentence_segments(manifest)
+        manifest["segments"] = sentence_segments(manifest, sentence_ms, paragraph_ms)
     manifest.pop("speech_preparation", None)
     manifest["highlight_mode"] = highlight
+    manifest["pause_policy"] = {"sentence_ms": sentence_ms, "paragraph_ms": paragraph_ms,
+                                "question_exclamation_ms": max(sentence_ms, 600), "ellipsis_ms": max(sentence_ms, 700),
+                                "mid_sentence_role_ms": 180}
     manifest["voices"] = [v for v in manifest["voices"] if v["id"] in used]
     for i, segment in enumerate(manifest["segments"]):
         segment["order"] = i
@@ -440,6 +460,8 @@ def main():
     prep.add_argument("--timing")
     prep.add_argument("--start-paragraph", default="p00058")
     prep.add_argument("--highlight", choices=["sentence", "fragment"], default="sentence")
+    prep.add_argument("--sentence-pause-ms", type=int, default=450)
+    prep.add_argument("--paragraph-pause-ms", type=int, default=800)
     pack = commands.add_parser("package")
     pack.add_argument("--manifest", required=True)
     pack.add_argument("--audio-dir", required=True)
@@ -452,7 +474,10 @@ def main():
         if args.command == "prepare":
             if args.seconds is not None and args.seconds <= 0:
                 raise ValueError("Длительность должна быть положительной")
-            prepare(args.manifest, args.out, args.seconds, args.timing, args.start_paragraph, args.highlight)
+            if not 100 <= args.sentence_pause_ms <= 2000 or not args.sentence_pause_ms <= args.paragraph_pause_ms <= 4000:
+                raise ValueError("Некорректные паузы")
+            prepare(args.manifest, args.out, args.seconds, args.timing, args.start_paragraph, args.highlight,
+                    args.sentence_pause_ms, args.paragraph_pause_ms)
         elif args.command == "package":
             package(args.manifest, args.audio_dir, args.out)
         else:

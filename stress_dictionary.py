@@ -132,6 +132,10 @@ class StressDictionary:
             original = match[0]
             if "\u0301" in original or "ё" in original.lower():
                 return original
+            # A lexical stress marker on a one-vowel word carries no location
+            # information, but can cause artificial emphasis in a TTS model.
+            if sum(c in ru.VOWELS for c in original.lower()) <= 1:
+                return original
             target = self.lookup(original, text, match.start(), match.end())
             if target is None and text[match.end():match.end()+1] == "-":
                 prefix = self.data["prefixes"].get(original.lower())

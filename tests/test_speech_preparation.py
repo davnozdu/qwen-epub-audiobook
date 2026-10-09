@@ -118,7 +118,7 @@ class StressTests(unittest.TestCase):
         def obtain(out, name, prompt, validator, settings, key):
             calls.append(name)
             payload = __import__("json").loads(prompt.split("\n")[-1])
-            return validator({"texts": payload["texts"]})
+            return validator({"issues": []})
         with tempfile.TemporaryDirectory() as temp, patch.object(p, "obtain", side_effect=obtain):
             result = p.process(manifest(), args("run"), Path(temp), "test")
         self.assertEqual(len(calls), 1)
@@ -144,7 +144,7 @@ class StressTests(unittest.TestCase):
                 data = __import__("json").loads(prompt.split("\n")[-1])
                 self.assertEqual(data["texts"][0], "Ве́тер его́.")
                 self.assertEqual(data["author_texts"][0], "Ветер его.")
-                return validator({"texts": data["texts"]})
+                return validator({"issues": []})
             with patch.object(p, "obtain", side_effect=obtain):
                 result = p.process(original, settings, Path(folder), "test")
             self.assertTrue(p.check(result))
@@ -220,7 +220,7 @@ class StressTests(unittest.TestCase):
         def obtain(out, name, prompt, validator, settings, key):
             payload = __import__("json").loads(prompt.split("\n")[-1])
             calls.append(payload)
-            return validator({"texts": [accent(t) for t in payload["texts"]]})
+            return validator({"issues": []})
         with tempfile.TemporaryDirectory() as temp, patch.object(p, "obtain", side_effect=obtain):
             result = p.process(original, args("run", 20), Path(temp), "secret-not-stored")
             self.assertEqual(len(calls), 2)

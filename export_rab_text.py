@@ -23,8 +23,8 @@ def export(manifest_path, destination):
         "source_manifest": str(Path(manifest_path).resolve()),
         "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
         "paragraphs": len(paragraphs), "source_segments": len(manifest["segments"]),
-        "acute_marks": text.count("\u0301"), "llm": False,
-        "synthesis": "rab/qwen_tts_stress.py unchanged; one macOS Milena reference",
+        "acute_marks": text.count("\u0301"), "llm": manifest.get("speech_preparation", {}).get("mode") in {"llm", "hybrid-llm"},
+        "synthesis": "text export only; no audio generated",
     }
     destination.with_suffix(".json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False))

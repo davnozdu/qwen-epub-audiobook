@@ -17,7 +17,7 @@ elif [[ -n "${1:-}" ]]; then
   exit 1
 fi
 mkdir -p "$TASK_OUT/audio" "$TASK_OUT/result"
-echo "Ru-Stress-CF / rab: готовые роли → предложения → словари + контроль LLM без размышлений → VoiceDesign → Base → M4B + EPUB"
+echo "Ru-Stress-CF / rab: роли → предложения → словарь/Silero → LLM по выбору (только споры) → VoiceDesign → Base → M4B + EPUB"
 if ! (
   "$TASK_PYTHON" -u "$TASK_PROJECT/setup_stress_qwen.py" verify || exit 1
   if [[ "${1:-}" == "--full" ]]; then
@@ -29,21 +29,26 @@ if ! (
       --seconds 300 --timing "$TASK_ROOT/audio-test-fresh/timeline.json" \
       --start-paragraph p00058 --out "$TASK_OUT/source" || exit 1
   fi
-  "$TASK_PYTHON" -u "$TASK_PROJECT/prepare_speech.py" run \
-    --manifest "$TASK_OUT/source/manifest.json" || exit 1
+  "$TASK_ROOT/.venv-stress/bin/python" -u "$TASK_PROJECT/prepare_silero.py" \
+    --llm-disputes ask --manifest "$TASK_OUT/source/manifest.json" || exit 1
   "$TASK_PYTHON" -u "$TASK_PROJECT/synthesize_qwen_mlx.py" \
     --manifest "$TASK_OUT/source/manifest.json" \
     --model "$TASK_ROOT/models/Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source" \
     --design-model "$TASK_ROOT/models/Qwen3-TTS-12Hz-1.7B-VoiceDesign-8bit" \
     --ephemeral-voices --mode clone --rab-generation --temperature 0.9 \
     --stress-marks keep --whole-book --out "$TASK_OUT/audio" || exit 1
+  "$TASK_PYTHON" -u "$TASK_PROJECT/normalize_book_audio.py" \
+    --audio-dir "$TASK_OUT/audio" --out "$TASK_OUT/audio-normalized" || exit 1
   "$TASK_PYTHON" -u "$TASK_PROJECT/audiobook_epub.py" package \
-    --manifest "$TASK_OUT/source/manifest.json" --audio-dir "$TASK_OUT/audio" --out "$TASK_OUT/result"
+    --manifest "$TASK_OUT/source/manifest.json" --audio-dir "$TASK_OUT/audio-normalized" --out "$TASK_OUT/result"
 ) 2>&1 | tee "$TASK_OUT/run.log"; then
   echo "Ошибка. Журнал: $TASK_OUT/run.log"
   read "?Нажмите Enter, чтобы закрыть окно."
   exit 1
 fi
 open "$TASK_OUT/result"
+if [[ "${1:-}" != "--full" ]]; then
+  open -a "QuickTime Player" "$TASK_OUT/audio-normalized/sample.mp3" || echo "Для прослушивания откройте: $TASK_OUT/audio-normalized/sample.mp3"
+fi
 echo "Готово: book.m4b и book-read-along.epub. Модели выгружены, временные голоса удалены."
 read "?Нажмите Enter, чтобы закрыть окно."

@@ -53,7 +53,7 @@ class BookTests(unittest.TestCase):
         self.assertEqual(len(manifest["segments"]), 3)
         self.assertEqual(manifest["segments"][0]["text"], "И. И. Иванов пришёл.")
         self.assertTrue(all(s["speaker"] == "narrator" for s in manifest["segments"]))
-        self.assertEqual([s["pause_after_ms"] for s in manifest["segments"]], [150, 150, 300])
+        self.assertEqual([s["pause_after_ms"] for s in manifest["segments"]], [450, 600, 800])
         with tempfile.TemporaryDirectory() as folder:
             a.build_text_epub(manifest, Path(folder) / "sentence.epub")
             a.validate_epub(Path(folder) / "sentence.epub", manifest)
