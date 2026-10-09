@@ -20,7 +20,6 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
-from bs4 import BeautifulSoup
 
 VERSION = "qwen-preparation-1"
 BLOCKS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "li", "blockquote", "dt", "dd"}
@@ -50,6 +49,7 @@ def member(base, href):
 
 
 def read_source(path):
+    from bs4 import BeautifulSoup
     raw = Path(path).read_bytes()
     paragraphs, chapters = [], []
     with zipfile.ZipFile(path) as archive:

@@ -105,9 +105,21 @@ def select_excerpt(manifest, timeline, seconds, start):
 
 def sentence_segments(manifest):
     from razdel import sentenize
+    from types import SimpleNamespace
     result = []
     for parent in manifest["segments"]:
         sentences = list(sentenize(parent["text"]))
+        # Razdel may emit the closing dialogue dash as its own sentence.
+        # Attach it to the preceding sentence within the SAME role/source span.
+        joined = []
+        for sentence in sentences:
+            if joined and not any(c.isalnum() for c in sentence.text):
+                previous = joined[-1]
+                joined[-1] = SimpleNamespace(start=previous.start, stop=sentence.stop,
+                    text=parent["text"][previous.start:sentence.stop])
+            else:
+                joined.append(sentence)
+        sentences = joined
         if not sentences:
             raise ValueError("Пустой фрагмент: " + parent["id"])
         base = parent["source"]["char_start"]
@@ -119,6 +131,11 @@ def sentence_segments(manifest):
             base += len(raw) - len(raw.lstrip())
         for number, sentence in enumerate(sentences, 1):
             row = deepcopy(parent)
+            # TTS offsets differ after numeral expansion; never slice/inherit a
+            # parent's normalized speech target into a newly split sentence.
+            for key in list(row):
+                if key.startswith("tts_"):
+                    del row[key]
             row["id"] = parent["id"] + f"_s{number:03d}" if len(sentences) > 1 else parent["id"]
             row["sentence_parent"] = parent["id"]
             row["text"] = sentence.text
@@ -202,6 +219,7 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
         manifest["paragraph_texts"] = {p["id"]: p["text"] for p in load(source_json)["paragraphs"] if p["id"] in selected_paragraphs}
     if highlight == "sentence":
         manifest["segments"] = sentence_segments(manifest)
+    manifest.pop("speech_preparation", None)
     manifest["highlight_mode"] = highlight
     manifest["voices"] = [v for v in manifest["voices"] if v["id"] in used]
     for i, segment in enumerate(manifest["segments"]):
@@ -228,6 +246,8 @@ def verify_timeline(manifest, timeline, total):
             raise ValueError("Некорректные временные привязки")
         if (segment["text"], segment["speaker"], segment["source"]) != (row["text"], row["speaker"], row["source"]):
             raise ValueError("Текст, роль или источник аудио не соответствует EPUB")
+        if segment.get("tts_text") != row.get("tts_text"):
+            raise ValueError("Нормализованный текст аудио не соответствует манифесту")
         previous = end
 
 
@@ -236,6 +256,10 @@ def metadata_value(value):
 
 
 def package(manifest_path, audio_dir, out):
+    candidate = load(manifest_path)
+    if candidate.get("speech_preparation"):
+        from prepare_speech import check
+        check(candidate)
     manifest, audio_dir, out = load(manifest_path), Path(audio_dir), Path(out)
     out.mkdir(parents=True, exist_ok=True)
     timeline = load(audio_dir / "timeline.json")["segments"]

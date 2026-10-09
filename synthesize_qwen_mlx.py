@@ -42,6 +42,32 @@ def reference_instruction(voice):
 
 MODEL_REVISION = "f90d617701d9f7f4ca499291e0b57f2b3c2fd2ee"
 BASE_REVISION = "e7dd0585652209fa0d7783659aad4e8a324de11c"
+RAB_REFERENCE_TEXT = "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
+
+
+def rab_chunks(text):
+    import importlib.util
+    script = Path(__file__).resolve().parent / "rab/qwen_tts_stress.py"
+    if not script.is_file():
+        script = Path(__file__).resolve().parent.parent / "rab/qwen_tts_stress.py"
+    spec = importlib.util.spec_from_file_location("rab_working_tts", script)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.split_text(module.normalize_stress(text), 250)
+
+
+def clone_options(reference, args):
+    """Working rab invocation: waveform input and native MLX sampler defaults."""
+    if getattr(args, "rab_generation", False):
+        if "ref_wave" not in reference:
+            from mlx_audio.utils import load_audio
+            reference["ref_wave"] = load_audio(reference["ref_audio"], sample_rate=24000)
+        return dict(ref_audio=reference["ref_wave"], ref_text=reference["ref_text"],
+                    lang_code="russian", temperature=args.temperature,
+                    max_tokens=args.max_tokens)
+    return dict(ref_audio=reference["ref_audio"], ref_text=reference["ref_text"],
+                lang_code="Russian", temperature=args.temperature, max_tokens=args.max_tokens,
+                top_k=50, top_p=1.0, repetition_penalty=1.05, stream=False, verbose=False)
 
 
 def library_profile(voice, book_hash):
@@ -161,6 +187,15 @@ def audio_metrics(audio, sr):
 
 def generate_audio(model, mx, text, instruct, seed, args, reference=None):
     import numpy as np
+    if not any(c.isalnum() for c in text):
+        # A punctuation-only original role span must stay anchored in EPUB,
+        # but is not speech. Supply a short silent interval without calling TTS.
+        sr = 24000
+        audio = np.zeros(round(sr * 0.05), dtype=np.float32)
+        metrics = audio_metrics(audio, sr)
+        metrics.update(synthesis_seconds=0.0, raw_audio_seconds=0.05,
+                       audio_tokens=0, rtf=0.0, realtime_speed=0.0, punctuation_only=True)
+        return audio, sr, metrics
     mx.random.seed(seed)
     mx.synchronize()
     started = time.perf_counter()
@@ -170,8 +205,14 @@ def generate_audio(model, mx, text, instruct, seed, args, reference=None):
     if reference is None:
         results = list(model.generate_voice_design(text=text, instruct=instruct, language="Russian", **options))
     else:
-        results = list(model.generate(text=text, ref_audio=reference["ref_audio"],
-                                      ref_text=reference["ref_text"], lang_code="Russian", **options))
+        chunks = rab_chunks(text) if getattr(args, "rab_generation", False) else [text]
+        results = []
+        for index, chunk in enumerate(chunks):
+            mx.random.seed(seed + index)
+            parts = list(model.generate(text=chunk, **clone_options(reference, args)))
+            if not parts:
+                raise ValueError("Модель не вернула аудио для части предложения")
+            results.extend(parts)
     mx.synchronize()
     if not results:
         raise ValueError("Модель не вернула аудио")
@@ -194,6 +235,13 @@ def generate_audio(model, mx, text, instruct, seed, args, reference=None):
     return audio, sr, metrics
 
 
+def speech_text(segment, stress_marks="keep"):
+    text = segment.get("tts_text", segment["text"])
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("Пустой текст озвучки")
+    return text.replace("\u0301", "") if stress_marks == "strip" else text
+
+
 def render(args):
     if args.ephemeral_voices:
         if args.voice_library or args.reference_source or args.import_only:
@@ -212,14 +260,20 @@ def _render(args, temporary_library=None):
     out.mkdir(parents=True, exist_ok=True)
     (out / "segments").mkdir(exist_ok=True)
     manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+    if manifest.get("speech_preparation") or any("tts_text" in s for s in manifest["segments"]):
+        from prepare_speech import check
+        check(manifest)
     if args.ephemeral_voices:
         for voice in manifest["voices"]:
             voice["instruct"] = reference_instruction(voice)
+    if getattr(args, "rab_generation", False):
+        for voice in manifest["voices"]:
+            voice["reference_text"] = RAB_REFERENCE_TEXT
     voices = {v["id"]: v for v in manifest["voices"]}
     candidates = manifest["segments"] if args.whole_book else select_segments(manifest, args.start_paragraph)
     model_path = Path(args.model).resolve()
     cloning = args.mode == "clone"
-    revision = BASE_REVISION if cloning else MODEL_REVISION
+    revision = "rab-native-mlx-v1" if getattr(args, "rab_generation", False) else BASE_REVISION if cloning else MODEL_REVISION
     library = Path(temporary_library or args.voice_library or Path(args.manifest).resolve().parent / "voice-library")
     library.mkdir(parents=True, exist_ok=True)
     if args.reference_source:
@@ -230,8 +284,9 @@ def _render(args, temporary_library=None):
                           "pending_voices": [cid for cid, ref in references.items() if not ref],
                           "library": str(library.resolve())}, ensure_ascii=False))
         return
-    plan = {"state": "prepared", "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-" + ("Base" if cloning else "VoiceDesign") + "-8bit",
+    plan = {"state": "prepared", "model": model_path.name,
             "model_path": str(model_path), "model_revision": revision,
+            "generation_profile": "rab native MLX" if getattr(args, "rab_generation", False) else "legacy",
             "book": manifest["book"], "target_audio_seconds": None if args.whole_book else args.seconds,
             "start_paragraph": candidates[0]["paragraph_id"], "temperature": args.temperature,
             "whole_book": args.whole_book,
@@ -306,8 +361,9 @@ def _render(args, temporary_library=None):
         print(f"Model ready: {device_info.get('device_name', 'Metal GPU')}; load {load_seconds:.2f}s", flush=True)
         warmup_started = time.perf_counter()
         first_voice = voices[candidates[0]["speaker"]]
-        generate_audio(model, mx, "Это короткая проверка звука.", first_voice["instruct"], first_voice["seed"], args,
-                       reference=references[first_voice["id"]] if cloning else None)
+        if not getattr(args, "rab_generation", False):
+            generate_audio(model, mx, "Это короткая проверка звука.", first_voice["instruct"], first_voice["seed"], args,
+                           reference=references[first_voice["id"]] if cloning else None)
         warmup_seconds = time.perf_counter() - warmup_started
         timeline, rows = [], []
         duration = 0.0
@@ -317,9 +373,11 @@ def _render(args, temporary_library=None):
             if s["speaker"] is None or s["speaker"] not in voices:
                 raise ValueError(f"Нельзя озвучить неопределённую роль {s['id']}")
             voice = voices[s["speaker"]]
+            target_text = speech_text(s, getattr(args, "stress_marks", "keep"))
             reference = references[s["speaker"]] if cloning else None
+            seed = voice["seed"] + len(rows) + 1 if getattr(args, "rab_generation", False) else voice["seed"]
             signature = identity([revision, str(model_path), manifest["book"]["input_sha256"],
-                                  s["text"], voice["instruct"], voice["seed"], args.temperature, args.max_tokens,
+                                  s["text"], target_text, voice["instruct"], seed, args.temperature, args.max_tokens,
                                   reference["wav_sha256"] if reference else None])
             wav = out / "segments" / (s["id"] + ".wav")
             meta = wav.with_suffix(".json")
@@ -332,9 +390,9 @@ def _render(args, temporary_library=None):
                     if cached:
                         metrics = previous["metrics"]
             if not cached:
-                audio, sr, metrics = generate_audio(model, mx, s["text"], voice["instruct"], voice["seed"], args, reference=reference)
+                audio, sr, metrics = generate_audio(model, mx, target_text, voice["instruct"], seed, args, reference=reference)
                 sf.write(wav, audio, sr, subtype="PCM_16")
-                save(meta, {"signature": signature, "text": s["text"], "speaker": s["speaker"],
+                save(meta, {"signature": signature, "text": s["text"], "speaker": s["speaker"], "spoken_text": target_text,
                             "wav_sha256": hashlib.sha256(wav.read_bytes()).hexdigest(), "metrics": metrics})
                 fresh += 1
             if sample_rate is not None and sample_rate != sr:
@@ -345,6 +403,8 @@ def _render(args, temporary_library=None):
             timeline.append({"segment_id": s["id"], "paragraph_id": s["paragraph_id"], "speaker": s["speaker"],
                              "text": s["text"], "source": s["source"], "audio_start": offset,
                              "audio_end": duration, "needs_review": s["needs_review"]})
+            if "tts_text" in s:
+                timeline[-1].update(tts_text=s["tts_text"], spoken_text=target_text)
             if reference:
                 timeline[-1]["reference_sha256"] = reference["wav_sha256"]
             # Outer model silence was trimmed, so the planned montage pause is added once.
@@ -394,13 +454,20 @@ def _render(args, temporary_library=None):
         save(out / "progress.json", {"state": "complete", "audio_seconds": duration, "segments": len(rows)})
         print(f"DONE: {duration:.1f}s audio; synthesis {synthesis_seconds:.1f}s; speed {report['realtime_speed']:.2f}x realtime; {mp3}", flush=True)
 
+    except BaseException as exc:
+        # Completed traceback frames retain the model argument on failed
+        # generation, even after our local 'model = None'. Drop their locals.
+        import traceback
+        traceback.clear_frames(exc.__traceback__)
+        raise
     finally:
         model = designer = None
         gc.collect()
         try:
             mx.synchronize()
             mx.clear_cache()
-            print(f"Models released; active MLX allocations {mx.get_active_memory() / 1e9:.3f} GB", flush=True)
+            remaining = mx.get_active_memory() / 1e9
+            print(f"Model references cleared; active MLX allocations {remaining:.3f} GB; process exit releases remaining allocations", flush=True)
         except Exception as cleanup_error:
             print(f"GPU cleanup warning: {cleanup_error}; process exit will release remaining allocations", flush=True)
 
@@ -414,8 +481,11 @@ def main():
     parser.add_argument("--start-paragraph", default="p00058")
     parser.add_argument("--temperature", type=float, default=0.7)
     parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--stress-marks", choices=["keep", "strip"], default="keep",
+                        help="keep Unicode acute accents for an audio test; strip if this checkpoint misreads them")
     parser.add_argument("--plan", action="store_true", help="prepare and validate selection without loading MLX")
     parser.add_argument("--mode", choices=["clone", "design"], default="clone")
+    parser.add_argument("--rab-generation", action="store_true", help="working rab-style native MLX generation: waveform reference and short role samples; no ICL/EOS patches")
     parser.add_argument("--voice-library", help="persistent WAV+transcript library; defaults next to manifest")
     parser.add_argument("--design-model", help="local VoiceDesign used only for missing reference voices")
     parser.add_argument("--reference-source", help="import whole voice references from a previous test directory")

@@ -14,6 +14,13 @@ import synthesize_qwen_mlx as q
 
 
 class SelectionTests(unittest.TestCase):
+    def test_rab_chunks_preserve_words_and_stress_with_250_character_limit(self):
+        text = ("Он звони́т и чита́ет докуме́нт. " * 20).strip()
+        chunks = q.rab_chunks(text)
+        self.assertTrue(all(len(c) <= 250 for c in chunks))
+        self.assertEqual(" ".join(chunks), text)
+        self.assertEqual(q.rab_chunks("Зв+онит. Ё\u0301лка."), ["Зво́нит. Ёлка."])
+
     def test_explicit_gender_and_distinct_female_instructions(self):
         def voice(cid, gender, age="adult"):
             return {"id": cid, "voice_gender": gender, "age": age, "voice_description": "Custom timbre"}
@@ -77,6 +84,19 @@ class SelectionTests(unittest.TestCase):
 
 @unittest.skipIf(np is None, "Requires the separate MLX runtime's numpy")
 class AudioTests(unittest.TestCase):
+    def test_rab_clone_uses_saved_waveform_and_native_sampling_defaults(self):
+        waveform = np.full(24000, 0.1, dtype=np.float32)
+        reference = {"ref_audio": "/saved/arina.wav", "ref_text": "Точный образец", "ref_wave": waveform}
+        args = SimpleNamespace(rab_generation=True, temperature=0.9, max_tokens=1024)
+        options = q.clone_options(reference, args)
+        self.assertIs(options["ref_audio"], waveform)
+        self.assertEqual(options["ref_text"], reference["ref_text"])
+        self.assertEqual(options["lang_code"], "russian")
+        self.assertEqual(options["temperature"], 0.9)
+        self.assertNotIn("top_k", options)
+        self.assertNotIn("repetition_penalty", options)
+        self.assertIs(q.clone_options(reference, args)["ref_audio"], waveform)
+
     def test_clone_reuses_reference_instead_of_designing_voice(self):
         calls = []
         result = SimpleNamespace(audio=np.full(2000, 0.1, dtype=np.float32), sample_rate=1000, token_count=20)
@@ -94,6 +114,13 @@ class AudioTests(unittest.TestCase):
             self.assertEqual(call["ref_text"], reference["ref_text"])
             self.assertEqual(call["lang_code"], "Russian")
             self.assertNotIn("instruct", call)
+
+    def test_punctuation_only_does_not_call_model(self):
+        audio, sr, metrics = q.generate_audio(None, None, "– …", "", 1, None)
+        self.assertEqual(sr, 24000)
+        self.assertTrue(np.all(audio == 0))
+        self.assertTrue(metrics["punctuation_only"])
+        self.assertEqual(metrics["synthesis_seconds"], 0)
 
     def test_trim_preserves_internal_silence_and_breathing_room(self):
         sr = 1000

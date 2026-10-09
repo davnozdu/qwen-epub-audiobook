@@ -11,3 +11,19 @@ These projects are dependencies; their source and weights are not bundled here.
 
 No blanket license for user-owned source code is chosen by this repository.
 Review dependency licenses before redistributing or operating a public service.
+
+## Supertonic text preparation
+
+`russian_text.py` adapts the user-provided Supertonic Android Russian book,
+number and date normalizers. `supertonic_rules.json` contains its numeral tables,
+acronym lists and Russian text-preparation instruction from `LlmProviders.kt`.
+Source supplied at `/Users/davnozdu/Downloads/supertonic`, under
+`supertonic-android/app/src/main/java/com/brahmadeo/supertonic/tts/`;
+source file SHA-256 values are embedded in that JSON for traceability.
+Android/Silero neural binaries, weights and English currency rules are not bundled.
+Local static dictionaries are imported separately and excluded from Git.
+The optional full SACC dictionary is from
+https://github.com/davnozdu/supertonic-dictionaries/releases/tag/russian-v1.1
+(179200764 bytes, SHA-256 a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27).
+Its data is not redistributed in this repository. No additional license grant
+is asserted for user-owned or separately downloaded dictionary data.

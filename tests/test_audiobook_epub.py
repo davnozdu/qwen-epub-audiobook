@@ -27,6 +27,20 @@ def timeline(manifest):
 
 
 class BookTests(unittest.TestCase):
+    def test_closing_dialogue_dash_is_not_a_separate_tts_sentence(self):
+        m = fixture()
+        row = m["segments"][0]
+        text = "– Вот и спасибо! –"
+        row.update(text=text)
+        row["source"].update(char_start=0, char_end=len(text))
+        m["segments"] = [row]
+        m["paragraph_texts"] = {"p1": text}
+        split = a.sentence_segments(m)
+        self.assertEqual(len(split), 1)
+        self.assertEqual(split[0]["text"], text)
+        self.assertEqual(split[0]["speaker"], row["speaker"])
+        self.assertEqual(split[0]["source"], row["source"])
+
     def test_sentence_mode_preserves_roles_offsets_and_paragraph(self):
         manifest = fixture()
         text = "И. И. Иванов пришёл. Арина ответила: «Да!» Потом стало тихо."

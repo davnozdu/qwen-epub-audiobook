@@ -18,3 +18,4 @@ runtime-downloads/
 .env.*
 credentials*
 secrets*
+data/stress/
