@@ -25,6 +25,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import builtins
 import json
 import os
 import pathlib
@@ -74,6 +76,75 @@ def compile_notebook(path: pathlib.Path) -> list[str]:
         except SyntaxError as exc:
             bad.append(f"ячейка {index}: {exc}")
     return bad
+
+
+NOTEBOOK_BUILTINS = {"__name__", "get_ipython", "display", "In", "Out", "_ih", "_oh", "_dh"}
+
+
+def _code_without_magics(cell: dict) -> str:
+    keep, skip = [], False
+    for line in "".join(cell["source"]).splitlines():
+        if skip or line.lstrip().startswith(("%", "!")):
+            skip = line.rstrip().endswith("\\")
+            continue
+        keep.append(line)
+    return "\n".join(keep)
+
+
+def _bind_names(tree: ast.AST, defined: set[str]) -> None:
+    """Добавляет в defined всё, что ячейка связывает: импорты, присваивания, аргументы функций."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                defined.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                defined.add(alias.asname or alias.name)
+        elif isinstance(node, ast.ClassDef):
+            defined.add(node.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            if not isinstance(node, ast.Lambda):
+                defined.add(node.name)
+            node_args = node.args
+            for arg in list(node_args.posonlyargs) + list(node_args.args) + list(node_args.kwonlyargs):
+                defined.add(arg.arg)
+            if node_args.vararg:
+                defined.add(node_args.vararg.arg)
+            if node_args.kwarg:
+                defined.add(node_args.kwarg.arg)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                defined.update(n.id for n in ast.walk(target) if isinstance(n, ast.Name))
+        elif isinstance(node, ast.For):
+            defined.update(n.id for n in ast.walk(node.target) if isinstance(n, ast.Name))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    defined.update(n.id for n in ast.walk(item.optional_vars) if isinstance(n, ast.Name))
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            defined.add(node.name)
+        elif isinstance(node, ast.comprehension):
+            defined.update(n.id for n in ast.walk(node.target) if isinstance(n, ast.Name))
+
+
+def undefined_names(path: pathlib.Path) -> list[str]:
+    """Имена, которые ячейка использует, но ни она, ни предыдущие не определяют.
+
+    Ловит забытый `import json` посреди ноутбука: в Colab это NameError, а локальный прогон ячеек
+    с подложенным пространством имён его не видит. Порядок важен: ячейки идут сверху вниз.
+    """
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    defined = set(dir(builtins)) | NOTEBOOK_BUILTINS
+    problems = []
+    for index, cell in enumerate(c for c in notebook["cells"] if c["cell_type"] == "code"):
+        source = _code_without_magics(cell)
+        tree = ast.parse(source or "pass")
+        _bind_names(tree, defined)
+        missing = sorted({node.id for node in ast.walk(tree)
+                          if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in defined})
+        if missing:
+            problems.append(f"ячейка {index}: нет импорта для {', '.join(missing)}")
+    return problems
 
 
 def main() -> int:
@@ -152,6 +223,9 @@ def main() -> int:
         cells = sum(1 for c in notebook["cells"] if c["cell_type"] == "code")
         bad = compile_notebook(path)
         check(not bad, f"{path.name}: {cells} кодовых ячеек компилируются" + (" / " + "; ".join(bad) if bad else ""))
+        missing_names = undefined_names(path)
+        check(not missing_names, f"{path.name}: каждая ячейка импортирует то, что использует"
+              + (" / " + "; ".join(missing_names) if missing_names else ""))
         if path.name == "qwen_tts_colab_full_book.ipynb":
             text = json.dumps(notebook, ensure_ascii=False)
             for marker, label in (("Path.cwd() / name", "загруженный файл ищется в cwd и в /content"),
@@ -167,13 +241,18 @@ def main() -> int:
         section("4. Сквозной прогон пропущен (нет --book)")
     else:
         section("4. Сквозной прогон colab_run_all.py до стадии ударений")
+        # Прогон патчит файлы репозитория (mlx-metal → mlx[cuda], ffmpeg → /usr/bin), поэтому работаем
+        # на копии: аудируемое дерево портить нельзя — при --no-clone это ваша рабочая папка.
+        worktree = pathlib.Path(tempfile.mkdtemp(prefix="verify-repo-")) / "repo"
+        shutil.copytree(clone, worktree, ignore=shutil.ignore_patterns(".git", "__pycache__", "*.pyc"))
+        print("  копия для прогона:", worktree)
         out_dir = pathlib.Path(tempfile.mkdtemp(prefix="verify-run-"))
         command = [PY, "colab/colab_run_all.py", pathlib.Path(args.book).expanduser(),
                    "--out", out_dir, "--test-seconds", "300", "--upto", "stress",
                    "--skip-install", "--skip-gpu-check"]
         if args.model_dir:
             command += ["--model-dir", pathlib.Path(args.model_dir).expanduser()]
-        code, out = sh(command, clone, timeout=1800)
+        code, out = sh(command, worktree, timeout=1800)
         print("\n".join(out.splitlines()[-14:]))
         check(code == 0, "прогон завершился без ошибок")
         check("Traceback" not in out, "в логе нет трейсбеков")
@@ -198,21 +277,23 @@ def main() -> int:
         google.colab = fake_colab
         sys.modules["google"], sys.modules["google.colab"] = google, fake_colab
 
-        notebook = json.loads((clone / "colab/qwen_tts_colab_full_book.ipynb").read_text(encoding="utf-8"))
+        notebook = json.loads((worktree / "colab/qwen_tts_colab_full_book.ipynb").read_text(encoding="utf-8"))
         cells = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
         labels = {0: "окружение", 4: "проверка правок репозитория", 5: "каталоги проекта", 6: "загрузка EPUB",
                   8: "манифест из EPUB", 9: "URL образца голоса", 10: "библиотека голосов",
                   11: "prepare: нарезка и book-text.epub", 12: "ударения"}
         skip = {1: "установка пакетов", 2: "проверка MLX", 3: "клонирование (shell)", 7: "скачивание весов",
                 13: "план синтеза", 14: "синтез", 15: "громкость", 16: "музыка", 17: "упаковка", 18: "скачивание"}
-        globals_dict = {"os": os, "Path": pathlib.Path, "sys": sys, "print": print, "json": json}
+        # Пространство имён пустое: только встроенные. Всё, что ячейка использует, она обязана
+        # импортировать сама — ровно так в Colab теряется `import json` и падает в конце шага.
+        globals_dict = {"__name__": "__main__"}
         for index, cell in enumerate(cells):
             if index in skip:
                 print(f"  · ячейка «{skip[index]}» — пропущена (нужен Colab/GPU)")
                 continue
             source = (cell.replace('ROOT = pathlib.Path("/content/qwen-epub-audiobook")',
-                                   f'ROOT = pathlib.Path("{clone}")')
-                          .replace('REPO = "/content/qwen-epub-audiobook"', f'REPO = "{clone}"')
+                                   f'ROOT = pathlib.Path("{worktree}")')
+                          .replace('REPO = "/content/qwen-epub-audiobook"', f'REPO = "{worktree}"')
                           .replace('OUT_ROOT = Path("/content/audiobook")', f'OUT_ROOT = Path("{work}/audiobook")')
                           .replace('"python"', f'"{PY}"'))
             try:
