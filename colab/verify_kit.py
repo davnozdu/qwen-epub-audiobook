@@ -125,9 +125,13 @@ def main() -> int:
     for path in sorted(clone.glob("*.py")) + sorted(clone.glob("colab/*.py")):
         code_c, _ = sh([PY, "-m", "py_compile", path], pathlib.Path("/tmp"))
         check(code_c == 0, f"компилируется: {path.relative_to(clone)}")
+    harness = {"verify_kit.py"}          # сам чекер содержит эти строки как текст проверок
     for path in sorted(clone.glob("colab/*.py")):
         text = path.read_text(encoding="utf-8")
         rel = path.relative_to(clone)
+        if path.name in harness:
+            print(f"  · {rel}: правила проверяются, но сам чекер из них исключён")
+            continue
         if path.name == "build_single_voice_manifest.py":
             check('(HERE.parent / "prepare_qwen.py").is_file()' in text,
                   f"{rel}: сам находит корень репозитория")
