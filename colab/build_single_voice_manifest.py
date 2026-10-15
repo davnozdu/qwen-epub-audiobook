@@ -103,7 +103,7 @@ def build(book, out, target_chars=220, max_chars=360, dialogue_id="dialog"):
     print(json.dumps({"manifest": str(out / "manifest.json"), "paragraphs": len(paragraphs),
                       "segments": len(manifest["segments"]), "dialogue_segments": dialogue_spans,
                       "voices": len(manifest["voices"]), "chapters": len(manifest["chapters"]),
-                      "review": len(manifest["stats"]["review_segments"])}, ensure_ascii=False))
+                      "review": manifest["stats"]["review_segments"]}, ensure_ascii=False))
     return out / "manifest.json"
 
 
