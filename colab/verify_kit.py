@@ -229,6 +229,8 @@ def main() -> int:
             check(False, f"colab_run_all.py: в STAGES нет {earlier} или {later}")
     check('append("--whole-book")' in all_stages,
           "colab_run_all.py: синтез всегда получает --whole-book (фрагмент задаёт prepare)")
+    check('(Path(source) / "manifest.json")' in all_stages,
+          "colab_run_all.py: библиотека голосов берёт идентичность из подготовленного манифеста")
 
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/*.ipynb")):
@@ -250,7 +252,7 @@ def main() -> int:
                                   ("prepare_silero.py", "ударения: словарь + Silero"),
                                   ("mix_book_music.py", "музыка из репозитория"),
                                   ('BASE.append("--whole-book")', "синтез озвучивает весь подготовленный фрагмент"),
-                                  ('source" / "manifest.json"', "библиотека голосов берёт идентичность из подготовленного манифеста")):
+                                  ('SOURCE / "manifest.json"', "библиотека голосов берёт идентичность из подготовленного манифеста")):
                 check(marker in text, f"полная книга: {label}")
 
     if not args.book:
