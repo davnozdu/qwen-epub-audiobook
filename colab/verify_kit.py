@@ -285,6 +285,7 @@ def main() -> int:
                                   ("prepare_silero.py", "ударения: словарь + Silero"),
                                   ("mix_book_music.py", "музыка из репозитория"),
                                   ('BASE.append("--whole-book")', "синтез озвучивает весь подготовленный фрагмент"),
+                                  ("REBUILD = False", "повторный запуск не пересобирает подготовку и кэш синтеза"),
                                   ("MLX_CUDA_CONV_CACHE_SIZE", "кэш свёрток MLX/CUDA увеличен (иначе Cache thrashing)"),
                                   ('SOURCE / "manifest.json"', "библиотека голосов берёт идентичность из подготовленного манифеста")):
                 check(marker in text, f"полная книга: {label}")
