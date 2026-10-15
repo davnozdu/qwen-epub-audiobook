@@ -240,7 +240,8 @@ def main() -> int:
         check(not missing_names, f"{path.name}: каждая ячейка импортирует то, что использует"
               + (" / " + "; ".join(missing_names) if missing_names else ""))
         if path.name == "qwen_tts_colab_full_book.ipynb":
-            text = json.dumps(notebook, ensure_ascii=False)
+            # именно исходный текст ячеек, а не json.dumps: в дампе кавычки экранированы
+            text = "\n".join("".join(c["source"]) for c in notebook["cells"])
             for marker, label in (("Path.cwd() / name", "загруженный файл ищется в cwd и в /content"),
                                   ("PYTHONPATH", "PYTHONPATH у дочерних процессов"),
                                   ("snapshot_download", "веса через snapshot_download"),
