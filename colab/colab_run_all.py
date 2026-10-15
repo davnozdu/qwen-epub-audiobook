@@ -400,8 +400,9 @@ def stage_synth(args, source, library, model_dir):
                "--model", model_dir, "--out", str(audio), "--mode", "clone", "--rab-generation",
                "--stress-marks", "keep", "--temperature", "0.9", "--voice-library", str(library),
                "--start-paragraph", "p00001"]
-    if not args.test_seconds:
-        command.append("--whole-book")
+    # --whole-book всегда: границу фрагмента задаёт prepare (--seconds). Без него синтез
+    # останавливается по своей оценке длительности, timeline короче манифеста и package падает.
+    command.append("--whole-book")
 
     if args.rebuild or not (audio / "benchmark.json").exists():
         run(command + ["--plan"])

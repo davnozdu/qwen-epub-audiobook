@@ -30,6 +30,7 @@ import builtins
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -217,6 +218,18 @@ def main() -> int:
                     continue
                 check("env=" in window, f"{rel}: PYTHONPATH у дочернего процесса — {line.strip()[:50]}")
 
+    all_stages = (clone / "colab/colab_run_all.py").read_text(encoding="utf-8")
+    match = re.search(r"STAGES = \[(.*?)\]", all_stages, re.S)
+    stages = re.findall(r'"([a-z]+)"', match.group(1)) if match else []
+    for earlier, later in (("manifest", "prepare"), ("prepare", "voices"), ("stress", "voices"), ("voices", "synth")):
+        if earlier in stages and later in stages:
+            check(stages.index(earlier) < stages.index(later),
+                  f"colab_run_all.py: стадия {earlier} идёт до {later}")
+        else:
+            check(False, f"colab_run_all.py: в STAGES нет {earlier} или {later}")
+    check('append("--whole-book")' in all_stages,
+          "colab_run_all.py: синтез всегда получает --whole-book (фрагмент задаёт prepare)")
+
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/*.ipynb")):
         notebook = json.loads(path.read_text(encoding="utf-8"))
@@ -234,7 +247,9 @@ def main() -> int:
                                   ("HF_HUB_DISABLE_XET", "xet отключён"),
                                   ("book-read-along.epub", "упаковка M4B + EPUB"),
                                   ("prepare_silero.py", "ударения: словарь + Silero"),
-                                  ("mix_book_music.py", "музыка из репозитория")):
+                                  ("mix_book_music.py", "музыка из репозитория"),
+                                  ('BASE.append("--whole-book")', "синтез озвучивает весь подготовленный фрагмент"),
+                                  ('source" / "manifest.json"', "библиотека голосов берёт идентичность из подготовленного манифеста")):
                 check(marker in text, f"полная книга: {label}")
 
     if not args.book:
