@@ -15,7 +15,9 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-REPO = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
+# Скрипт лежит в colab/, а модули репозитория — в корне: находим корень в любом случае.
+REPO = HERE.parent if (HERE.parent / "prepare_qwen.py").is_file() else HERE
 sys.path.insert(0, str(REPO))
 from prepare_qwen import export_project, read_source, validate_cast, validate_roles, write  # noqa: E402
 

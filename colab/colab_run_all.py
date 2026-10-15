@@ -65,7 +65,8 @@ def banner(step, text):
 def run(cmd, **kwargs):
     """Запуск дочернего процесса с печатью вывода в реальном времени."""
     print("+", " ".join(str(part) for part in cmd), flush=True)
-    process = subprocess.Popen([str(part) for part in cmd], cwd=str(kwargs.pop("cwd", REPO)),
+    env = dict(os.environ, PYTHONPATH=str(REPO) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    process = subprocess.Popen([str(part) for part in cmd], cwd=str(kwargs.pop("cwd", REPO)), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, bufsize=1)
     for line in process.stdout:
