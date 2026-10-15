@@ -104,6 +104,19 @@ def stage_env(args):
         except Exception as exc:
             why.append(f"torch: {exc}")
 
+    if not gpu:
+        try:
+            import mlx.core as mx                       # MLX на Metal тоже даёт gpu
+            device = mx.default_device()
+            if "gpu" in str(device).lower():
+                info = {}
+                try:
+                    info = mx.device_info()
+                except Exception:
+                    pass
+                gpu = f"MLX {info.get('device_name') or device}"
+        except Exception as exc:
+            why.append(f"mlx: {exc}")
     print("GPU   :", gpu or "НЕ НАЙДЕН")
     if not gpu:
         print("  почему не нашли:", "; ".join(why) or "неизвестно")
