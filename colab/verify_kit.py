@@ -231,6 +231,8 @@ def main() -> int:
           "colab_run_all.py: синтез всегда получает --whole-book (фрагмент задаёт prepare)")
     check('(Path(source) / "manifest.json")' in all_stages,
           "colab_run_all.py: библиотека голосов берёт идентичность из подготовленного манифеста")
+    check('MLX_CUDA_CONV_CACHE_SIZE' in all_stages,
+          "colab_run_all.py: кэш свёрток MLX/CUDA увеличен до запуска синтеза")
 
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/*.ipynb")):
@@ -252,6 +254,7 @@ def main() -> int:
                                   ("prepare_silero.py", "ударения: словарь + Silero"),
                                   ("mix_book_music.py", "музыка из репозитория"),
                                   ('BASE.append("--whole-book")', "синтез озвучивает весь подготовленный фрагмент"),
+                                  ("MLX_CUDA_CONV_CACHE_SIZE", "кэш свёрток MLX/CUDA увеличен (иначе Cache thrashing)"),
                                   ('SOURCE / "manifest.json"', "библиотека голосов берёт идентичность из подготовленного манифеста")):
                 check(marker in text, f"полная книга: {label}")
 
@@ -327,6 +330,13 @@ def main() -> int:
                 else:
                     check(False, f"ячейка «{labels.get(index, index)}»: {type(exc).__name__}: {exc}")
         check((work / "audiobook/project/source/book-text.epub").is_file(), "ноутбук дошёл до book-text.epub")
+
+        # Переменная, из-за которой синтез падал на CUDA, должна доехать до дочернего процесса.
+        code_env, out_env = sh([PY, "-c", "import os;print(os.environ.get('MLX_CUDA_CONV_CACHE_SIZE', ''))"],
+                               worktree)
+        value = out_env.strip()
+        check(code_env == 0 and value.isdigit() and int(value) >= 4096,
+              f"дочерний процесс синтеза видит MLX_CUDA_CONV_CACHE_SIZE={value or '—'} (нужно ≥ 4096)")
 
     section("ИТОГ")
     if PROBLEMS:

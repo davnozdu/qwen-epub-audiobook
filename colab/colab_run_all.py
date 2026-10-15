@@ -57,6 +57,11 @@ PACKAGES = ["mlx[cuda]==0.32.3", "mlx-audio==0.5.8", "transformers==5.19.0", "hu
 STAGES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voices",
           "synth", "normalize", "music", "package"]
 PATCH_FILES = ["audiobook_epub.py", "normalize_book_audio.py", "mix_book_music.py", "synthesize_qwen_mlx.py"]
+# Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing».
+# Лимит — это потолок, а не резервация: память берётся по мере надобности, поэтому на T4 с её
+# ~15 ГБ ставим 8192 МБ и не экономим. Если и этого мало — ступени ниже удваивают потолок.
+CONV_CACHE_MB = 8192
+CONV_CACHE_STEPS = (CONV_CACHE_MB, 12288)
 
 
 def banner(step, text):
@@ -65,21 +70,40 @@ def banner(step, text):
 
 def run(cmd, **kwargs):
     """Запуск дочернего процесса с печатью вывода в реальном времени."""
+    code, _ = run_capture(cmd, **kwargs)
+    if code != 0:
+        raise SystemExit(f"Команда упала с кодом {code}: {' '.join(str(p) for p in cmd)}")
+    return code
+
+
+def run_capture(cmd, cache_mb=None, **kwargs):
+    """То же, но возвращает (код, хвост вывода): по нему распознаётся Cache thrashing.
+
+    cache_mb задаёт MLX_CUDA_CONV_CACHE_SIZE этому дочернему процессу явно, не надеясь
+    на унаследованное окружение.
+    """
     print("+", " ".join(str(part) for part in cmd), flush=True)
     env = dict(os.environ, PYTHONPATH=str(REPO) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    if cache_mb:
+        env["MLX_CUDA_CONV_CACHE_SIZE"] = str(cache_mb)
     process = subprocess.Popen([str(part) for part in cmd], cwd=str(kwargs.pop("cwd", REPO)), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, bufsize=1)
+    tail = []
     for line in process.stdout:
         print(line.rstrip(), flush=True)
+        tail.append(line)
+        del tail[:-60]
     process.wait()
-    if process.returncode != 0:
-        raise SystemExit(f"Команда упала с кодом {process.returncode}: {' '.join(str(p) for p in cmd)}")
-    return process.returncode
+    return process.returncode, "".join(tail)
 
 
 # ─────────────────────────── 1. окружение ───────────────────────────
 def stage_env(args):
+    # Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing
+    # is happening, please set the environment variable MLX_CUDA_CONV_CACHE_SIZE to a larger
+    # value than 128». Ставим до запуска дочерних процессов — они наследуют окружение.
+    os.environ.setdefault("MLX_CUDA_CONV_CACHE_SIZE", str(CONV_CACHE_MB))
     banner("env", "Окружение: GPU, glibc, ffmpeg")
     import platform
 
@@ -406,9 +430,19 @@ def stage_synth(args, source, library, model_dir):
 
     if args.rebuild or not (audio / "benchmark.json").exists():
         run(command + ["--plan"])
-        started = time.time()
-        run(command)
-        print(f"синтез занял {time.time() - started:.0f} с")
+        # Ступени кэша свёрток: при «Cache thrashing» процесс падает — повторяем с удвоенным
+        # кэшем, уже синтезированные сегменты берутся из кэша, работа не теряется.
+        for cache_mb in CONV_CACHE_STEPS:
+            started = time.time()
+            code, log = run_capture(command, cache_mb=cache_mb)
+            if code == 0:
+                print(f"синтез занял {time.time() - started:.0f} с; кэш свёрток MLX/CUDA — {cache_mb} МБ")
+                break
+            if "Cache thrashing" in log and cache_mb != CONV_CACHE_STEPS[-1]:
+                print(f"\nсинтез упал на кэше {cache_mb} МБ (Cache thrashing) — повторяю с "
+                      f"{CONV_CACHE_STEPS[CONV_CACHE_STEPS.index(cache_mb) + 1]} МБ", flush=True)
+                continue
+            raise SystemExit(f"синтез упал с кодом {code} (кэш свёрток {cache_mb} МБ)")
     else:
         print("аудио уже собрано:", audio / "benchmark.json")
 
