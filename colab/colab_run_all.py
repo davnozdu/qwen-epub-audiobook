@@ -17,9 +17,10 @@
   3. repo     правки репозитория под Linux + словарь ударений на место
   4. model    веса Ru-Stress-CF (~4,5 ГБ) в локальную папку + проверка размера и состава
   5. manifest EPUB → манифест проекта (один чтец; с OLLAMA_API_KEY — многоголосая разметка LLM)
-  6. voices   образец чтеца с GitHub → библиотека голосов (профиль считает сам репозиторий)
-  7. prepare  audiobook_epub.py prepare: нарезка по предложениям + book-text.epub
-  8. stress   prepare_silero.py: словарь Supertonic + Silero (ударения как в проде)
+  6. prepare  audiobook_epub.py prepare: нарезка по предложениям + book-text.epub
+  7. stress   prepare_silero.py: словарь Supertonic + Silero (ударения как в проде)
+  8. voices   образец чтеца с GitHub → библиотека голосов под ПОДГОТОВЛЕННЫЙ манифест
+              (именно этот хеш книги сверяет синтез, поэтому стадия идёт после prepare)
   9. synth    synthesize_qwen_mlx.py: MLX/CUDA, mode clone, rab-generation
  10. normalize normalize_book_audio.py: громкость по LUFS
  11. music    mix_book_music.py: фоновая музыка из репозитория (5 %)
@@ -53,7 +54,7 @@ VOICE_SHA256 = "fffc3115c15ebc1d6a9aac68b776ca99f92cf737e2aa99dcc1d8b8f28b2533ea
 PACKAGES = ["mlx[cuda]==0.32.3", "mlx-audio==0.5.8", "transformers==5.19.0", "huggingface-hub==1.33.0",
             "soundfile==0.14.0", "EbookLib==0.20", "lxml==6.1.3", "six==1.17.0", "razdel==0.5.0",
             "beautifulsoup4>=4.12,<5", "silero-stress==1.5"]
-STAGES = ["env", "deps", "repo", "model", "manifest", "voices", "prepare", "stress",
+STAGES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voices",
           "synth", "normalize", "music", "package"]
 PATCH_FILES = ["audiobook_epub.py", "normalize_book_audio.py", "mix_book_music.py", "synthesize_qwen_mlx.py"]
 
@@ -303,13 +304,13 @@ def stage_manifest(args):
 
 
 # ─────────────────────────── 6. библиотека голосов ───────────────────────────
-def stage_voices(args, project, manifest):
+def stage_voices(args, source):
     banner("voices", "Образец чтеца с GitHub → библиотека голосов")
     import urllib.request
 
     from synthesize_qwen_mlx import library_profile, read_reference
 
-    library = project / "voice-library"
+    library = Path(source).parent / "voice-library"
     library.mkdir(parents=True, exist_ok=True)
     base_wav = library / "narrator.wav"
     if not base_wav.exists():
@@ -333,6 +334,9 @@ def stage_voices(args, project, manifest):
         print("сайдкар не скачался, беру расшифровку из скрипта:", exc)
     print("расшифровка:", transcript[:60], "…")
 
+    # Профиль роли читаем из подготовленного манифеста: prepare перезаписал book.input_sha256 хешем
+    # book-text.epub, и именно это значение synth сверяет в read_reference.
+    manifest = json.loads((Path(source) / "manifest.json").read_text(encoding="utf-8"))
     book_hash = manifest["book"]["input_sha256"]
     for voice in manifest["voices"]:
         target = library / (voice["id"] + ".wav")
@@ -486,12 +490,14 @@ def main():
         model_dir = stage_model(args)
     if limit >= STAGES.index("manifest"):
         project, manifest = stage_manifest(args)
-    if limit >= STAGES.index("voices"):
-        library = stage_voices(args, project, manifest)
     if limit >= STAGES.index("prepare"):
         source = stage_prepare(args, project)
     if limit >= STAGES.index("stress"):
         stage_stress(args, source)
+    if limit >= STAGES.index("voices"):
+        # Библиотека голосов собирается ПОСЛЕ prepare: prepare перезаписывает book.input_sha256 хешем
+        # собранного book-text.epub, и синтез сверяет профиль роли именно с этим значением.
+        library = stage_voices(args, source)
     if limit >= STAGES.index("synth"):
         audio = stage_synth(args, source, library, model_dir)
     if limit >= STAGES.index("normalize"):

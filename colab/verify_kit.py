@@ -240,7 +240,7 @@ def main() -> int:
     if not args.book:
         section("4. Сквозной прогон пропущен (нет --book)")
     else:
-        section("4. Сквозной прогон colab_run_all.py до стадии ударений")
+        section("4. Сквозной прогон colab_run_all.py до стадии «voices» (всё, что до синтеза)")
         # Прогон патчит файлы репозитория (mlx-metal → mlx[cuda], ffmpeg → /usr/bin), поэтому работаем
         # на копии: аудируемое дерево портить нельзя — при --no-clone это ваша рабочая папка.
         worktree = pathlib.Path(tempfile.mkdtemp(prefix="verify-repo-")) / "repo"
@@ -248,7 +248,7 @@ def main() -> int:
         print("  копия для прогона:", worktree)
         out_dir = pathlib.Path(tempfile.mkdtemp(prefix="verify-run-"))
         command = [PY, "colab/colab_run_all.py", pathlib.Path(args.book).expanduser(),
-                   "--out", out_dir, "--test-seconds", "300", "--upto", "stress",
+                   "--out", out_dir, "--test-seconds", "300", "--upto", "voices",
                    "--skip-install", "--skip-gpu-check"]
         if args.model_dir:
             command += ["--model-dir", pathlib.Path(args.model_dir).expanduser()]
@@ -256,8 +256,9 @@ def main() -> int:
         print("\n".join(out.splitlines()[-14:]))
         check(code == 0, "прогон завершился без ошибок")
         check("Traceback" not in out, "в логе нет трейсбеков")
-        for required in ("project/manifest.json", "project/source.json", "project/voice-library/narrator.json",
-                         "project/source/manifest.json", "project/source/book-text.epub"):
+        for required in ("project/manifest.json", "project/source.json",
+                         "project/voice-library/narrator.json", "project/source/manifest.json",
+                         "project/source/book-text.epub"):
             check((out_dir / required).is_file(), f"создан {required}")
         prepared = json.loads((out_dir / "project/source/manifest.json").read_text(encoding="utf-8"))
         marked = sum(1 for s in prepared["segments"] if "\u0301" in s.get("tts_text", ""))
@@ -280,8 +281,8 @@ def main() -> int:
         notebook = json.loads((worktree / "colab/qwen_tts_colab_full_book.ipynb").read_text(encoding="utf-8"))
         cells = ["".join(c["source"]) for c in notebook["cells"] if c["cell_type"] == "code"]
         labels = {0: "окружение", 4: "проверка правок репозитория", 5: "каталоги проекта", 6: "загрузка EPUB",
-                  8: "манифест из EPUB", 9: "URL образца голоса", 10: "библиотека голосов",
-                  11: "prepare: нарезка и book-text.epub", 12: "ударения"}
+                  8: "манифест из EPUB", 9: "prepare: нарезка и book-text.epub", 10: "ударения",
+                  11: "URL образца голоса", 12: "библиотека голосов под подготовленный манифест"}
         skip = {1: "установка пакетов", 2: "проверка MLX", 3: "клонирование (shell)", 7: "скачивание весов",
                 13: "план синтеза", 14: "синтез", 15: "громкость", 16: "музыка", 17: "упаковка", 18: "скачивание"}
         # Пространство имён пустое: только встроенные. Всё, что ячейка использует, она обязана
