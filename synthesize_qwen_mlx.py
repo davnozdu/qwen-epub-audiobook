@@ -16,6 +16,18 @@ import time
 import tempfile
 import signal
 
+
+def installed_version(name):
+    """Версия пакета или None, если его нет в этом окружении.
+
+    На Linux нет mlx-metal (там mlx-cuda-12), и падать из-за строчки в отчёте нельзя:
+    это происходит в самом конце синтеза, когда всё аудио уже сгенерировано.
+    """
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
 VOICE_STYLES = {
     "narrator": "Adult male narrator, warm mid-low baritone, smooth resonant timbre, measured neutral storytelling.",
     "matvey_egorovich": "Adult male, deep rounded bass, full chest resonance, relaxed confident delivery.",
@@ -438,7 +450,7 @@ def _render(args, temporary_library=None):
         raw_seconds = sum(r["raw_audio_seconds"] for r in rows)
         report = dict(plan, state="complete", audio_generated=True, device_info=device_info,
                       platform=platform.platform(), python=platform.python_version(),
-                      packages={p: importlib.metadata.version(p) for p in ["mlx", "mlx-metal", "mlx-audio", "transformers", "numpy"]},
+                      packages={p: installed_version(p) for p in ["mlx", "mlx-metal", "mlx-cuda-12", "mlx-audio", "transformers", "numpy"]},
                       model_load_seconds=load_seconds, warmup_seconds=warmup_seconds,
                       voice_library_setup_seconds=library_seconds,
                       synthesis_seconds=synthesis_seconds, raw_audio_seconds=raw_seconds,

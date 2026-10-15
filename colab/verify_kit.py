@@ -148,6 +148,34 @@ def undefined_names(path: pathlib.Path) -> list[str]:
     return problems
 
 
+def unguarded_versions(path: pathlib.Path) -> list[str]:
+    """Вызовы версии пакета вне try/except.
+
+    Такой вызов в конце синтеза убивает уже готовое аудио: на Linux нет mlx-metal,
+    и `importlib.metadata.version("mlx-metal")` поднимает PackageNotFoundError после
+    всей работы. Версии — это строчка в отчёте, падать из-за неё нельзя.
+    """
+    source = path.read_text(encoding="utf-8")
+    if "metadata" not in source:
+        return []
+    tree = ast.parse(source)
+    imports_alias = "from importlib.metadata import version" in source
+    guarded = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Try):
+            for child in ast.walk(ast.Module(body=node.body, type_ignores=[])):
+                guarded.add(id(child))
+    bad = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or id(node) in guarded:
+            continue
+        name = ast.unparse(node.func)
+        if (isinstance(node.func, ast.Attribute) and node.func.attr == "version" and "metadata" in name) \
+                or (imports_alias and name == "version"):
+            bad.append(f"строка {node.lineno}: {name}(…)")
+    return bad
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Проверка colab-обвязки на свежем клоне репозитория")
     parser.add_argument("--book", help="epub для сквозного прогона (без него — только статические проверки)")
@@ -197,6 +225,9 @@ def main() -> int:
     for path in sorted(clone.glob("*.py")) + sorted(clone.glob("colab/*.py")):
         code_c, _ = sh([PY, "-m", "py_compile", path], pathlib.Path("/tmp"))
         check(code_c == 0, f"компилируется: {path.relative_to(clone)}")
+        loose = unguarded_versions(path)
+        check(not loose, f"{path.name}: версии пакетов читаются через try/except"
+              + (" / " + "; ".join(loose) if loose else ""))
     harness = {"verify_kit.py"}          # сам чекер содержит эти строки как текст проверок
     for path in sorted(clone.glob("colab/*.py")):
         text = path.read_text(encoding="utf-8")

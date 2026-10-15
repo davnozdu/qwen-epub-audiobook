@@ -4,7 +4,7 @@ import argparse
 import getpass
 from collections import defaultdict
 from copy import deepcopy
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 import json
 import os
 from pathlib import Path
@@ -14,6 +14,15 @@ from types import SimpleNamespace
 
 from prepare_qwen import digest, load, write
 from prepare_speech import VERSION, check, process, validate_text
+
+
+def installed_version(name):
+    """Версия пакета или None: строчка версии в отчёте не повод падать."""
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
 
 WORD = re.compile(r"[А-Яа-яЁё]+(?:\u0301[А-Яа-яЁё]*)*")
 MARKED_WORD = re.compile(r"[+А-Яа-яЁё\u0301]+")
@@ -213,8 +222,8 @@ def main():
         torch.set_num_threads(1)
         start = time.monotonic()
         accentor = load_accentor()
-        print(f"Silero Stress {version('silero-stress')}: CPU, загрузка {time.monotonic()-start:.2f}s", flush=True)
-        result, report = prepare(load(args.manifest), accentor, version("silero-stress"), args.dictionary_dir, args.strategy)
+        print(f"Silero Stress {installed_version('silero-stress')}: CPU, загрузка {time.monotonic()-start:.2f}s", flush=True)
+        result, report = prepare(load(args.manifest), accentor, installed_version("silero-stress"), args.dictionary_dir, args.strategy)
         del accentor
         print("Silero Stress освобождён; арбитраж LLM не загружает локальную модель.", flush=True)
         destination = Path(args.out or args.manifest)

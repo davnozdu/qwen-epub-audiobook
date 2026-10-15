@@ -59,9 +59,10 @@ STAGES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voic
 PATCH_FILES = ["audiobook_epub.py", "normalize_book_audio.py", "mix_book_music.py", "synthesize_qwen_mlx.py"]
 # Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing».
 # Лимит — это потолок, а не резервация: память берётся по мере надобности, поэтому на T4 с её
-# ~15 ГБ ставим 8192 МБ и не экономим. Если и этого мало — ступени ниже удваивают потолок.
-CONV_CACHE_MB = 8192
-CONV_CACHE_STEPS = (CONV_CACHE_MB, 12288)
+# ~15 ГБ ставим 12288 МБ и не экономим (при 8192 трэшинг ещё ловится). Ступени ниже поднимают
+# потолок дальше, если и этого не хватит.
+CONV_CACHE_MB = 12288
+CONV_CACHE_STEPS = (CONV_CACHE_MB, 16384)
 
 
 def banner(step, text):
