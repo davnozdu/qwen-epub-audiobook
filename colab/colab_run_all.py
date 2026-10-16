@@ -56,7 +56,8 @@ PACKAGES = ["mlx[cuda]==0.32.3", "mlx-audio==0.5.8", "transformers==5.19.0", "hu
             "beautifulsoup4>=4.12,<5", "silero-stress==1.5"]
 STAGES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voices",
           "synth", "normalize", "music", "package"]
-PATCH_FILES = ["audiobook_epub.py", "normalize_book_audio.py", "mix_book_music.py", "synthesize_qwen_mlx.py"]
+# setup_audiobook.py не патчим: это локальная установка на macOS, на арендованной машине он не нужен.
+PATCH_SKIP = {"setup_audiobook.py", "colab_run_all.py"}
 # Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing».
 # Лимит — это потолок, а не резервация: память берётся по мере надобности, поэтому на T4 с её
 # ~15 ГБ ставим 12288 МБ и не экономим (при 8192 трэшинг ещё ловится). Ступени ниже поднимают
@@ -225,15 +226,15 @@ def stage_repo(args):
             if patched != text:
                 path.write_text(patched, encoding="utf-8")
                 changes.append(f"{name}: mlx-metal → mlx[cuda]")
-        for name in PATCH_FILES:
-            path = REPO / name
-            if not path.exists():
+        # Патчим все скрипты конвейера, а не список: иначе новый файл с маковым путём роняет прогон.
+        for path in sorted(REPO.glob("*.py")):
+            if path.name in PATCH_SKIP:
                 continue
             text = path.read_text(encoding="utf-8")
             patched = text.replace("/opt/homebrew/bin/", "/usr/bin/")
             if patched != text:
                 path.write_text(patched, encoding="utf-8")
-                changes.append(f"{name}: пути ffmpeg → /usr/bin")
+                changes.append(f"{path.name}: пути ffmpeg → /usr/bin")
     print("изменения:", changes or ("macOS: правки под Linux не нужны" if sys.platform == "darwin"
                                     else "нечего менять (уже пропатчено)"))
 
