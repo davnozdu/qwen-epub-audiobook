@@ -249,20 +249,20 @@ def main() -> int:
                     continue
                 check("env=" in window, f"{rel}: PYTHONPATH у дочернего процесса — {line.strip()[:50]}")
 
-    # Файл с маковым путём, который Colab не патчит, роняет прогон на Linux — уже случалось,
-    # когда в репозиторий попал новый скрипт с /opt/homebrew/bin/ffmpeg.
+    # То же, что проверяет сам Colab в stage_repo: после правок Colab в скриптах конвейера
+    # маковых путей остаться не должно. Раньше новый файл с /opt/homebrew ронял прогон на Linux.
     skip_match = re.search(r"PATCH_SKIP = \{([^}]*)\}", (clone / "colab/colab_run_all.py").read_text(encoding="utf-8"))
     patch_skip = set(re.findall(r'"([^"]+)"', skip_match.group(1))) if skip_match else set()
-    mac_only = [f"{path.name}:{number}" for path in sorted(clone.glob("*.py"))
-                if path.name in patch_skip                     # эти файлы Colab править не станет
-                for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-                if "/opt/homebrew" in line]
-    check(not mac_only, f"в файлах из PATCH_SKIP нет маковых путей: {mac_only}")
-    patchable = [f"{path.name}:{number}" for path in sorted(clone.glob("*.py"))
-                 if path.name not in patch_skip
-                 for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
-                 if "/opt/homebrew" in line]
-    check(bool(patchable), f"маковые пути есть в патчимых файлах (Colab их перепишет): {patchable}")
+    mac_leftover = []
+    for path in sorted(clone.glob("*.py")):
+        if path.name == "setup_audiobook.py":          # локальный установщик для macOS, на машине не нужен
+            continue
+        text = path.read_text(encoding="utf-8")
+        if path.name not in patch_skip:                # ровно так правит Colab
+            text = text.replace("/opt/homebrew/bin/", "/usr/bin/")
+        mac_leftover += [f"{path.name}:{number}" for number, line in enumerate(text.splitlines(), 1)
+                         if "/opt/homebrew/bin" in line]
+    check(not mac_leftover, f"после правок Colab маковых путей не остаётся: {mac_leftover}")
 
     all_stages = (clone / "colab/colab_run_all.py").read_text(encoding="utf-8")
     match = re.search(r"STAGES = \[(.*?)\]", all_stages, re.S)
