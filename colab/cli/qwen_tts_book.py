@@ -4,7 +4,7 @@
 
 Запуск на свежей VM Colab (одна строка, книга указывается сразу за именем файла):
 
-    colab run --gpu T4 --keep -s book colab/qwen_tts_book.py "kniga.epub"
+    colab run --gpu T4 --keep -s book colab/cli/qwen_tts_book.py "kniga.epub"
 
     # книга задаётся как: имя файла (ищется в /content, /content/drive/MyDrive, текущем каталоге),
     # любой путь внутри машины или ссылка http(s) — ссылка скачается.
@@ -19,7 +19,7 @@
 
 Локально (macOS, Metal) то же самое, без установки и без проверки GPU:
 
-    python colab/qwen_tts_book.py kniga.epub --local --model-dir "<папка с весами>"
+    python colab/cli/qwen_tts_book.py kniga.epub --local --model-dir "<папка с весами>"
 
 Сам конвейер не переписывается: вся работа стадий — в colab/colab_run_all.py, этот файл
 только находит книгу, запускает конвейер, упаковывает результат в zip и печатает итог.

@@ -222,14 +222,14 @@ def main() -> int:
         check(code_e == 0, f"colab/{name}: с посторонним PYTHONPATH")
 
     section("2. Статические проверки исходников")
-    for path in sorted(clone.glob("*.py")) + sorted(clone.glob("colab/*.py")):
+    for path in sorted(clone.glob("*.py")) + sorted(clone.glob("colab/**/*.py")):
         code_c, _ = sh([PY, "-m", "py_compile", path], pathlib.Path("/tmp"))
         check(code_c == 0, f"компилируется: {path.relative_to(clone)}")
         loose = unguarded_versions(path)
         check(not loose, f"{path.name}: версии пакетов читаются через try/except"
               + (" / " + "; ".join(loose) if loose else ""))
     harness = {"verify_kit.py"}          # сам чекер содержит эти строки как текст проверок
-    for path in sorted(clone.glob("colab/*.py")):
+    for path in sorted(clone.glob("colab/**/*.py")):
         text = path.read_text(encoding="utf-8")
         rel = path.relative_to(clone)
         if path.name in harness:
@@ -266,7 +266,7 @@ def main() -> int:
           "colab_run_all.py: кэш свёрток MLX/CUDA увеличен до запуска синтеза")
 
     section("3. Ячейки ноутбуков")
-    for path in sorted(clone.glob("colab/*.ipynb")):
+    for path in sorted(clone.glob("colab/**/*.ipynb")):
         notebook = json.loads(path.read_text(encoding="utf-8"))
         cells = sum(1 for c in notebook["cells"] if c["cell_type"] == "code")
         bad = compile_notebook(path)

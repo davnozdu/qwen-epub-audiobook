@@ -4,8 +4,9 @@
 
 | файл | что это |
 |---|---|
-| `qwen_tts_book_cli.ipynb` | **запуск из терминала через Colab CLI**: параметры в первой ячейке, на выходе один zip с `book.m4b` + `book-read-along.epub` |
-| `qwen_tts_book.py` | то же задание скриптом: `colab run --gpu T4 --keep -s book colab/qwen_tts_book.py "kniga.epub"` — книга указывается сразу за именем файла |
+| `cli/run-book.command` | **одна команда для Colab CLI**: `./run-book.command kniga.epub` — поднимает машину, заливает книгу, гонит конвейер, кладёт zip в ~/Downloads, освобождает машину |
+| `cli/qwen_tts_book.py` | задание, которое запускает обёртка (книга аргументом или единственный epub в /content) |
+| `cli/qwen_tts_book_cli.ipynb` | то же задание блокнотом: параметры в первой ячейке, для `colab exec -f` |
 | `qwen_tts_colab_full_book.ipynb` | **вся книга в браузере**: EPUB → манифест → ударения (словарь Supertonic + Silero) → синтез MLX/CUDA → музыка → **`book.m4b` + `book-read-along.epub`** |
 | `qwen_tts_colab_check_all.ipynb` | один Run all: окружение, установка, правки репозитория с проверкой, RTF |
 | `qwen_tts_colab_smoke_mlx.ipynb` | только замер RTF на MLX |
@@ -18,25 +19,39 @@
 
 ### Из терминала, через Colab CLI (без браузера)
 
-```bash
-pip install google-colab-cli                                   # один раз
+Папка `colab/cli/` — самодостаточный комплект: обёртка `run-book.command`, задание
+`qwen_tts_book.py` и блокнот `qwen_tts_book_cli.ipynb`. Скопируйте её куда угодно и запускайте
+из её корня — путей внутри нет, книга задаётся аргументом:
 
-colab new -s book --gpu T4                                     # сессия с GPU
-colab upload -s book ~/Downloads/kniga.epub /content/kniga.epub  # книга на машину
-colab exec -s book -f colab/qwen_tts_book_cli.ipynb             # блокнот с параметрами
-colab download -s book /content/out/kniga.zip ~/Downloads/      # архив с двумя файлами
-colab stop -s book                                              # освободить машину
+```bash
+pip install google-colab-cli                 # один раз
+cd colab/cli
+./run-book.command kniga.epub
 ```
 
-Или одной строкой, книга сразу за именем файла (скриптовая форма):
+Обёртка сама освобождает прошлые сессии CLI, поднимает машину с GPU, кладёт туда книгу,
+запускает конвейер, забирает `/content/out/<книга>.zip` в `~/Downloads` и гасит машину.
+Переменные: `GPU=L4`, `SESSION=book`, `FRAGMENT=300`, `HIGHLIGHT=fragment`, `KEEP_SESSION=1`.
+
+Если хочется вручную, шаг за шагом:
 
 ```bash
-colab run --gpu T4 --keep -s book colab/qwen_tts_book.py "kniga.epub"
+colab new -s book --gpu T4
+colab upload -s book ~/Downloads/kniga.epub /content/kniga.epub
+colab exec -s book -f colab/cli/qwen_tts_book.py --timeout 86400
 colab download -s book /content/out/kniga.zip ~/Downloads/
 colab stop -s book
 ```
 
-В обоих случаях на выходе `/content/out/<имя книги>.zip` c `book.m4b` и `book-read-along.epub`
+Или одной строкой, книга сразу за именем файла (скриптовая форма; для книги по ссылке):
+
+```bash
+colab run --gpu T4 --keep -s book --timeout 3600 colab/cli/qwen_tts_book.py "https://site.ru/kniga.epub"
+colab download -s book /content/out/kniga.zip ~/Downloads/
+colab stop -s book
+```
+
+Во всех случаях на выходе `/content/out/<имя книги>.zip` c `book.m4b` и `book-read-along.epub`
 внутри; путь, размер и sha256 печатаются в конце. Если Drive подключён (`colab drivemount -s book`),
 архив дополнительно копируется в `MyDrive/audiobooks/` — тогда `colab download` не нужен.
 Каталог проекта у каждой книги свой, поэтому кэши сегментов разных книг не перемешиваются.
