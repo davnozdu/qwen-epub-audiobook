@@ -41,8 +41,8 @@ if [ "${BOOK#http}" != "$BOOK" ]; then
     curl -L --fail --silent --show-error -o "$FETCHED" "$BOOK" || { echo "не скачалось: $BOOK"; exit 1; }
     BOOK="$FETCHED"
 fi
-BOOK="$(cd "$(dirname "$BOOK")" && pwd)/$(basename "$BOOK")"
 [ -f "$BOOK" ] || { echo "файла нет: $BOOK"; exit 1; }
+BOOK="$(cd "$(dirname "$BOOK")" && pwd)/$(basename "$BOOK")"
 
 GPU="${GPU:-T4}"
 SESSION="${SESSION:-book}"
