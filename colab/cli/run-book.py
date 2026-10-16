@@ -535,6 +535,17 @@ def main() -> int:
         os.environ["TELEGRAM_BOT_TOKEN"] = args.telegram_token
     if args.telegram_chat:
         os.environ["TELEGRAM_CHAT_ID"] = args.telegram_chat
+    if os.environ.get("TELEGRAM_BOT_TOKEN") and not os.environ.get("TELEGRAM_CHAT_ID"):
+        # Первый запуск с ключом: чат узнаём, как только боту напишут (бот не может писать первым).
+        try:
+            import telegram_notify
+            chat = telegram_notify.wait_for_chat(
+                os.environ["TELEGRAM_BOT_TOKEN"],
+                float(os.environ.get("TELEGRAM_WAIT_CHAT", "45")))
+        except Exception:
+            chat = ""
+        if chat:
+            os.environ["TELEGRAM_CHAT_ID"] = chat
 
     here = pathlib.Path(__file__).resolve().parent
     job = here / "qwen_tts_book.py"

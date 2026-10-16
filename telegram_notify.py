@@ -56,6 +56,35 @@ def discover_chat(token: str) -> str:
     return chats[-1] if chats else ""
 
 
+def bot_username(token: str) -> str:
+    try:
+        return _call(token, "getMe").get("result", {}).get("username", "")
+    except Exception:
+        return ""
+
+
+def wait_for_chat(token: str, seconds: float = 60.0, log=print) -> str:
+    """Ждёт, пока боту напишут, и возвращает чат. Нужно один раз — дальше чат берётся сам."""
+    import time as _time
+
+    username = bot_username(token)
+    link = f"https://t.me/{username}" if username else "чат с вашим ботом"
+    log(f"   Telegram: ключ принял бот @{username or '…'}, но он ещё не знает, куда слать —")
+    log(f"   откройте {link} и нажмите Start (или отправьте боту любое сообщение).")
+    if seconds <= 0:
+        return ""
+    log(f"   жду до {seconds:.0f} с…")
+    deadline = _time.monotonic() + seconds
+    while _time.monotonic() < deadline:
+        chat = discover_chat(token)
+        if chat:
+            log(f"   Telegram: чат найден — {chat}; дальше сообщения пойдут туда.")
+            return chat
+        _time.sleep(3)
+    log("   Telegram: не дождался — уведомлений не будет, сборка идёт как обычно.")
+    return ""
+
+
 def notify(text: str, token: str | None = None, chat: str | None = None, log=print) -> bool:
     """Отправляет сообщение. Без ключа — тихо ничего не делает (и это нормально)."""
     token = (token or token_from_env()).strip()
@@ -67,7 +96,9 @@ def notify(text: str, token: str | None = None, chat: str | None = None, log=pri
         if not chat:
             if "nochat" not in WARNED:
                 WARNED.add("nochat")
-                log("  (уведомления в Telegram: чат не найден — напишите боту любое сообщение)")
+                username = bot_username(token)
+                log(f"  (Telegram: ключ принят ботом @{username or '…'}, но чат не известен — "
+                    f"напишите боту https://t.me/{username or ''} и запустите снова)")
             return False
     try:
         result = _call(token, "sendMessage", {"chat_id": chat, "text": text[:4000],
