@@ -22,8 +22,9 @@
 | `FRAGMENT=300` | озвучить только 300 секунд вместо всей книги |
 | `HIGHLIGHT=fragment` | подсветка по абзацам: сегментов меньше, синтез быстрее |
 | `KEEP_SESSION=1` | не гасить машину в конце: следующая книга пойдёт без установки пакетов и загрузки весов |
-| `DRIVE=1` | подключить Google Drive и положить архив в `MyDrive/Audiobooks-colab` (по умолчанию 1; `DRIVE=0` — не подключать) |
-| `DRIVE_DIR=...` | другая папка внутри `MyDrive` (по умолчанию `Audiobooks-colab`) |
+| `DRIVE=1` | подключить Google Drive и положить `book.m4b` и read-along epub в `MyDrive/Audiobooks-cli/<имя книги>` (по умолчанию 1; `DRIVE=0` — не подключать) |
+| `DRIVE_DIR=...` | другая папка внутри `MyDrive` (по умолчанию `Audiobooks-cli`) |
+| `DRIVE_WAIT=120` | сколько секунд ждать подтверждения Drive, потом продолжить без него |
 
 Примеры:
 
@@ -34,18 +35,28 @@
 
 ## Google Drive
 
-Архив кладётся и в `~/Downloads`, и на Drive — в папку `MyDrive/Audiobooks-colab` (создастся сама).
-Отдельная авторизация для этого не нужна: обёртка один раз за сессию делает `colab drivemount -s book`,
-это та же учётная запись, под которой работает сама машина. Если Google попросит подтверждение,
-CLI напечатает ссылку — открыть её, разрешить доступ и нажать Enter в терминале (до 10 минут).
+Отдельная авторизация не нужна: обёртка один раз за сессию делает `colab drivemount -s book` —
+это та же учётная запись, под которой работает машина. Если Google просит подтверждение, CLI
+печатает ссылку: открыть её, разрешить доступ и нажать Enter в терминале.
 
-Подключить вручную (например, к уже запущенной машине):
+Обёртка ждёт подтверждения `DRIVE_WAIT` секунд (по умолчанию 120). Дальше события такие:
+
+| что произошло | куда попадёт результат |
+|---|---|
+| Drive подключён | `MyDrive/Audiobooks-cli/<имя книги>/` — `book.m4b` и read-along epub **под именем книги**, и zip в `~/Downloads` |
+| нажали Enter без подтверждения доступа | Drive пропускаем, zip в `~/Downloads` (книга не теряется) |
+| за 120 секунд никто не ответил | попытку снимаем, Drive пропускаем, zip в `~/Downloads` |
+| `colab drivemount` упал | Drive пропускаем, zip в `~/Downloads` |
+
+Имя книги берётся из epub: файл `idiot-part1.epub` ляжет как
+`Audiobooks-cli/idiot-part1/idiot-part1.m4b` и `Audiobooks-cli/idiot-part1/idiot-part1-read-along.epub`.
+
+Подключить вручную (например, к уже запущенной машине) и положить файлы на Drive без обёртки:
 
     colab drivemount -s book
-    colab exec -s book -f qwen_tts_book.py      # задание скопирует архив в MyDrive/Audiobooks-colab
+    colab exec -s book -f qwen_tts_book.py      # задание само скопирует m4b и epub
 
-Если Drive подключён, а папки такой нет — она создастся. Если Drive не подключён, задание просто
-скажет об этом и продолжит: архив останется в `/content/out/` и заберётся локально.
+`DRIVE=0` (или `--no-drive` в задании) отключает Drive совсем.
 
 ## Файлы
 
@@ -66,7 +77,7 @@ CLI напечатает ссылку — открыть её, разрешит�
 ## Вручную, без обёртки
 
     colab new -s book --gpu T4
-    colab drivemount -s book                       # необязательно: архив ляжет в MyDrive/Audiobooks-colab
+    colab drivemount -s book                       # необязательно: m4b и epub лягут в MyDrive/Audiobooks-cli
     colab upload -s book kniga.epub /content/kniga.epub
     colab exec -s book -f qwen_tts_book.py
     colab download -s book /content/out/kniga.zip ~/Downloads/

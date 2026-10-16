@@ -20,9 +20,10 @@
 #   HIGHLIGHT=fragment  подсветка по абзацам: сегментов меньше, синтез быстрее
 #   KEEP_SESSION=1      не гасить машину в конце: следующая книга пойдёт без установки
 #                       пакетов и без повторной загрузки весов (потом: colab stop -s book)
-#   DRIVE=1             подключить Google Drive и положить архив в MyDrive/Audiobooks-colab
-#                       (по умолчанию 1; 0 — не подключать)
-#   DRIVE_DIR=...       папка внутри MyDrive (по умолчанию Audiobooks-colab)
+#   DRIVE=1             подключить Google Drive и положить book.m4b и read-along epub в
+#                       MyDrive/Audiobooks-cli/<имя книги> (по умолчанию 1; 0 — не подключать)
+#   DRIVE_DIR=...       папка внутри MyDrive (по умолчанию Audiobooks-cli)
+#   DRIVE_WAIT=120      сколько секунд ждать подтверждения Drive, потом продолжить без него
 set -euo pipefail
 
 BOOK="${1:-}"
@@ -120,12 +121,39 @@ echo "== поднимаю сессию $SESSION ($GPU) =="
 colab new -s "$SESSION" --gpu "$GPU" || fail
 
 DRIVE="${DRIVE:-1}"
-DRIVE_DIR="${DRIVE_DIR:-Audiobooks-colab}"
+DRIVE_DIR="${DRIVE_DIR:-Audiobooks-cli}"
+DRIVE_WAIT="${DRIVE_WAIT:-120}"      # сколько секунд ждать подтверждения Drive, потом едем без него
 if [ "$DRIVE" = "1" ]; then
     echo
     echo "== подключаю Google Drive (если появится ссылка — разрешить доступ и нажать Enter) =="
-    if ! colab drivemount -s "$SESSION"; then
-        echo "  Drive не подключился: архив всё равно заберём в ~/Downloads."
+    echo "   ждём ${DRIVE_WAIT} с: не успели — задание поедет без Drive, архив заберём локально"
+    colab drivemount -s "$SESSION" &
+    MOUNT_PID=$!
+    WAITED=0
+    while kill -0 "$MOUNT_PID" 2>/dev/null && [ "$WAITED" -lt "$DRIVE_WAIT" ]; do
+        sleep 2
+        WAITED=$((WAITED + 2))
+    done
+    MOUNT_STATE="cli-ok"
+    if kill -0 "$MOUNT_PID" 2>/dev/null; then
+        echo "  за ${DRIVE_WAIT} с подтверждения не было — снимаю попытку, Drive пропускаем."
+        pkill -P "$MOUNT_PID" 2>/dev/null || true
+        kill "$MOUNT_PID" 2>/dev/null || true
+        wait "$MOUNT_PID" 2>/dev/null || true
+        MOUNT_STATE="timeout"
+    elif ! wait "$MOUNT_PID"; then
+        MOUNT_STATE="cli-failed"
+    fi
+
+    # Enter без подтверждения доступа: CLI может завершиться «успешно», а монтирования нет —
+    # поэтому смотрим на машину, а не на код возврата.
+    if [ "$MOUNT_STATE" = "cli-ok" ] \
+        && echo 'import os; print("DRIVE_OK", os.path.isdir("/content/drive/MyDrive"))' \
+           | colab exec -s "$SESSION" 2>/dev/null | grep -q "DRIVE_OK True"; then
+        echo "  Drive подключён: book.m4b и read-along epub поедут в MyDrive/$DRIVE_DIR/<имя книги>"
+    else
+        [ "$MOUNT_STATE" = "timeout" ] || echo "  Drive не подключился (или доступ не подтверждён)."
+        echo "  едем без Drive: архив всё равно заберём в ~/Downloads."
         DRIVE=0
     fi
 fi

@@ -183,20 +183,27 @@ def pack(args, book):
 
     if args.no_drive:
         print("на Google Drive не копирую: --no-drive")
+    elif not DRIVE_ROOT.is_dir():
+        print(f"Google Drive не подключён — папку «{args.drive_dir}» не пополняю.")
+        print("  подключить (один раз на машину): colab drivemount -s <сессия>")
+        print("  затем повторить задание, либо забрать архив вручную: colab download ...")
     else:
-        if DRIVE_ROOT.is_dir():
-            drive_dir = DRIVE_ROOT / args.drive_dir
-            try:
-                drive_dir.mkdir(parents=True, exist_ok=True)
-                copy = drive_dir / archive.name
-                shutil.copyfile(archive, copy)
-                print(f"на Google Drive: {copy}")
-            except OSError as exc:
-                print(f"Drive подключён, но записать в {drive_dir} не вышло: {exc}")
+        stem = pathlib.Path(book).stem
+        book_dir = DRIVE_ROOT / args.drive_dir / stem       # папка называется по имени книги
+        names = {RESULT_FILES[0]: f"{stem}.m4b",
+                 RESULT_FILES[1]: f"{stem}-read-along.epub"}
+        try:
+            book_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            print(f"Drive подключён, но создать {book_dir} не вышло: {exc}")
         else:
-            print(f"Google Drive не подключён — папку «{args.drive_dir}» не пополняю.")
-            print("  подключить (один раз на машину): colab drivemount -s <сессия>")
-            print("  затем повторить задание, либо забрать архив вручную: colab download ...")
+            for source_name in RESULT_FILES:
+                target = book_dir / names[source_name]
+                try:
+                    shutil.copyfile(result / source_name, target)
+                    print(f"на Google Drive: {target} ({target.stat().st_size / 1e6:.1f} МБ)")
+                except OSError as exc:
+                    print(f"не скопировалось на Drive: {target} — {exc}")
 
     print("\nскачать на свой диск:\n"
           f"  colab download -s <сессия> {archive} ~/Downloads/{archive.name}")
@@ -217,8 +224,8 @@ def main():
     parser.add_argument("--model-dir", default=str(MODEL_DIR), help="где держать веса модели синтеза")
     parser.add_argument("--repo-url", default=REPO_URL, help="откуда клонировать конвейер")
     parser.add_argument("--repo-dir", default=str(REPO_DIR), help="куда клонировать конвейер")
-    parser.add_argument("--drive-dir", default="Audiobooks-colab",
-                        help="папка внутри MyDrive на подключённом Google Drive")
+    parser.add_argument("--drive-dir", default="Audiobooks-cli",
+                        help="папка внутри MyDrive; внутри неё — папка с именем книги")
     parser.add_argument("--no-drive", action="store_true", help="не копировать архив на Google Drive")
     parser.add_argument("--local", action="store_true",
                         help="локальный прогон (macOS/Metal): без pip install и без требования GPU")
