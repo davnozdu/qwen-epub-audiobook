@@ -24,7 +24,8 @@
   KEEP_SESSION=1      не гасить машину в конце (потом: colab stop -s book)
   DRIVE=1             положить book.m4b и read-along epub в MyDrive/<DRIVE_DIR>/<имя книги>
   DRIVE_DIR=...       папка внутри MyDrive (по умолчанию Audiobooks-colab)
-  DRIVE_WAIT=120      сколько секунд ждать подтверждения Drive, потом продолжить без него
+  DRIVE_WAIT=60       через сколько секунд нажать Enter и проверить доступ к Drive
+  DRIVE_AUTO_ENTER=0  не нажимать Enter автоматически (подтверждать вручную)
 """
 from __future__ import annotations
 
@@ -36,9 +37,15 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+
+try:
+    import pty                      # только Unix: нужен, чтобы нажать Enter за пользователя
+except ImportError:                 # pragma: no cover - Windows
+    pty = None
 import time
 import urllib.request
 
@@ -194,6 +201,143 @@ def open_browser(url: str) -> None:
 LAST_OUTPUT = ""          # хвост последнего вывода: нужен, чтобы понять причину сбоя
 
 
+def new_view(collect: bool) -> dict:
+    """Состояние вывода шага: хвост строки, найденные ссылки, когда показано приглашение."""
+    return {"collect": collect, "tail": "", "recent": "", "links": [], "link_at": None,
+            "prompt_at": None}
+
+
+def emit_output(text: str, view: dict, final: bool = False) -> None:
+    """Печатаем кусок вывода шага; ссылку авторизации Drive подсвечиваем прямо в строке CLI."""
+    global LAST_OUTPUT
+    LAST_OUTPUT = (LAST_OUTPUT + text)[-4000:]
+    view["recent"] = (view["recent"] + text)[-400:]
+    if re.search(r"press\s+enter", view["recent"], re.IGNORECASE) and not view["prompt_at"]:
+        view["prompt_at"] = time.monotonic()        # дальше CLI ждёт нажатия Enter
+    if not view["collect"]:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
+    view["tail"] += text
+    pieces = re.split(r"(\s+)", view["tail"])
+    if not final and not view["tail"][-1:].isspace():
+        view["tail"] = pieces.pop() if pieces else ""
+    else:
+        view["tail"] = ""
+    for piece in pieces:
+        if piece.startswith(("http://", "https://")) and is_drive_auth(piece):
+            sys.stdout.write(clickable(piece))      # подсвечиваем только ссылку авторизации Drive
+            if piece not in view["links"]:
+                view["links"].append(piece)
+                view["link_at"] = time.monotonic()
+                notify_telegram("🔗 Подтвердите доступ к Google Drive:\n" + piece)
+        else:
+            sys.stdout.write(piece)                 # прочие ссылки не трогаем
+    sys.stdout.flush()
+
+
+def drive_mount_step(cmd, wait_seconds: float, silent_cap: float, auto_enter: bool = True,
+                     open_links: bool = False):
+    """Монтирование Drive в терминале, которым управляем мы.
+
+    Это даёт две вещи: вывод идёт как есть (со подсвеченной ссылкой), и Enter можно нажать
+    за пользователя — он подтверждает доступ с телефона, а через wait_seconds обёртка сама
+    отправляет пустую строку. Дальше CLI либо доводит монтирование, либо завершается ошибкой:
+    и в том и в другом случае решает проверка на самой машине.
+
+    Возвращает (состояние, нажали_ли_enter): состояние — 'ok', 'failed' или 'timeout'.
+    """
+    import select
+
+    if pty is None:                                  # Windows: терминала не дадим, работаем как раньше
+        state = stream_step(cmd, timeout=wait_seconds, silent_timeout=silent_cap, open_links=open_links)
+        return state, False
+
+    view = new_view(sys.stdout.isatty() or open_links)
+    pid, master = pty.fork()
+    if pid == 0:                                     # ребёнок: сразу подменяем себя на CLI
+        try:
+            os.execvpe(str(cmd[0]), [str(part) for part in cmd], dict(os.environ))
+        except Exception:
+            os._exit(127)
+
+    started = time.monotonic()
+    outcome, entered, after_enter = "ok", False, None
+    try:
+        while True:
+            now = time.monotonic()
+            base = view["prompt_at"] or view["link_at"]
+            if after_enter:                              # после нашего Enter даём CLI доработать
+                if now > after_enter + 120:
+                    outcome = "timeout"
+                    break
+                limit = after_enter + 120
+            elif base:
+                if now - base >= max(1.0, wait_seconds):
+                    if auto_enter and not entered:       # время вышло — нажимаем Enter за пользователя
+                        os.write(master, b"\n")
+                        entered, after_enter = True, time.monotonic()
+                        print("\n  ⏎ Enter нажат автоматически — проверяю, дан ли доступ к Google Drive…",
+                              flush=True)
+                        notify_telegram("⏎ Enter нажат автоматически — проверяю доступ к Google Drive")
+                        continue
+                    outcome = "timeout"
+                    break
+                limit = base + max(1.0, wait_seconds)
+            else:                                        # ссылки нет: идёт обычное монтирование
+                if now > started + max(1.0, silent_cap):
+                    outcome = "silent-timeout"
+                    break
+                limit = started + max(1.0, silent_cap)
+            ready, _, _ = select.select([master], [], [], min(0.25, max(0.05, limit - now)))
+            if ready:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    emit_output(chunk.decode("utf-8", "replace").replace("\r\n", "\n"), view)
+            done, status = os.waitpid(pid, os.WNOHANG)
+            if done == pid:
+                while True:                          # добираем то, что осталось в буфере
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if not ready:
+                        break
+                    try:
+                        rest = os.read(master, 65536)
+                    except OSError:
+                        break
+                    if not rest:
+                        break
+                    emit_output(rest.decode("utf-8", "replace").replace("\r\n", "\n"), view)
+                emit_output("", view, final=True)
+                outcome = "ok" if os.waitstatus_to_exitcode(status) == 0 else "failed"
+                break
+        if open_links:
+            for url in view["links"]:
+                print(f"\n   открываю браузер: {url}", flush=True)
+                open_browser(url)
+    finally:
+        try:
+            os.close(master)
+        except OSError:
+            pass
+        if outcome in ("timeout", "silent-timeout"):
+            for killer in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(pid, killer)
+                except (ProcessLookupError, PermissionError):
+                    break
+                try:
+                    os.waitpid(pid, 0)
+                    break
+                except ChildProcessError:
+                    break
+                except OSError:
+                    time.sleep(0.5)
+    return outcome, entered
+
+
 def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_links: bool = False):
     """Запуск шага с живым выводом и потолком по времени.
 
@@ -212,34 +356,15 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
     process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ),
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     LIVE_CHILDREN.append(process)
-    tail, opened, state, links = "", set(), "ok", []
+    view = new_view(collect)
+    opened, state = set(), "ok"
 
     def emit(chunk, final=False):
         """Печатаем поток; ссылки подсвечиваем на месте — токен может прийти по частям."""
-        nonlocal tail, deadline
-        global LAST_OUTPUT
-        LAST_OUTPUT = (LAST_OUTPUT + chunk)[-4000:]
-        if not collect:
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-            return
-        tail += chunk
-        pieces = re.split(r"(\s+)", tail)
-        if not final and not tail[-1:].isspace():
-            tail = pieces.pop() if pieces else ""
-        else:
-            tail = ""
-        for piece in pieces:
-            if piece.startswith(("http://", "https://")) and is_drive_auth(piece):
-                sys.stdout.write(clickable(piece))     # подсвечиваем только ссылку авторизации Drive
-                if piece not in links:
-                    links.append(piece)
-                    notify_telegram("🔗 Подтвердите доступ к Google Drive:\n" + piece)
-                    # подтверждение ждём с момента, когда ссылка показана, а не с запуска
-                    deadline = time.monotonic() + max(1.0, timeout)
-            else:
-                sys.stdout.write(piece)                # прочие ссылки не трогаем
-        sys.stdout.flush()
+        nonlocal deadline
+        emit_output(chunk, view, final=final)
+        if view["link_at"] and view["links"]:
+            deadline = max(deadline, view["link_at"] + max(1.0, timeout))
 
     started = time.monotonic()
     deadline = started + max(1.0, timeout)          # ожидание подтверждения (ссылки и Enter)
@@ -252,9 +377,9 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
                     break
             now = time.monotonic()
             # до появления ссылки подтверждать нечего: это просто медленное монтирование
-            left = max(deadline, limit) - now if not links else deadline - now
+            left = max(deadline, limit) - now if not view["links"] else deadline - now
             if left <= 0:
-                state = "timeout" if links else "silent-timeout"
+                state = "timeout" if view["links"] else "silent-timeout"
                 break
             ready, _, _ = select.select([process.stdout], [], [], min(1.0, left))
             if not ready:
@@ -265,7 +390,7 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
             emit(chunk)
         emit("", final=True)                       # хвост без пробела всё равно печатаем
         if open_links:                           # ссылку показываем один раз — в строке самого CLI
-            for url in links or []:
+            for url in view["links"] or []:
                 if url not in opened:
                     opened.add(url)
                     print(f"\n   открываю браузер: {url}", flush=True)
@@ -399,14 +524,25 @@ def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = 
     а после любого исхода спрашиваем машину, смонтирован ли Drive на самом деле.
     """
     silent_cap = float(os.environ.get("DRIVE_MOUNT_WAIT", "180"))
+    auto_enter = os.environ.get("DRIVE_AUTO_ENTER", "1") not in ("0", "no", "false")
     print("\n== подключаю Google Drive ==")
-    print("   если Google попросит подтверждение, покажу ссылку подсвеченной — откройте её и разрешите")
-    print(f"   доступ, затем нажмите Enter в этом окне (ждём {wait_seconds} с после ссылки);")
-    print("   не дождались — задание поедет без Drive, архив заберём локально")
-    state = stream_step([colab, "drivemount", "-s", session], timeout=wait_seconds,
-                        silent_timeout=max(float(wait_seconds), silent_cap), open_links=open_links)
+    if auto_enter:
+        print("   если Google попросит подтверждение, покажу ссылку подсвеченной (она придёт и в Telegram):")
+        print("   откройте её и разрешите доступ — нажимать ничего не нужно,")
+        print(f"   через {wait_seconds} с Enter будет нажат автоматически, и обёртка сама проверит,")
+        print("   дан ли доступ: дан — файлы поедут на Drive, нет — задание поедет без него")
+    else:
+        print("   если Google попросит подтверждение, покажу ссылку подсвеченной;")
+        print(f"   подтвердите доступ и нажмите Enter здесь (ждём {wait_seconds} с после ссылки),")
+        print("   иначе задание поедет без Drive и архив заберём локально")
+    state, pressed = drive_mount_step([colab, "drivemount", "-s", session], wait_seconds=wait_seconds,
+                                      silent_cap=max(float(wait_seconds), silent_cap),
+                                      auto_enter=auto_enter, open_links=open_links)
     if state == "timeout":
-        print(f"  подтверждения не было за {wait_seconds} с после ссылки — снимаю попытку.")
+        if pressed:
+            print("  после нажатия Enter монтирование не завершилось — снимаю попытку.")
+        else:
+            print(f"  подтверждения не было за {wait_seconds} с после ссылки — снимаю попытку.")
     elif state == "silent-timeout":
         print(f"  монтирование не ответило за {silent_cap:.0f} с — снимаю попытку.")
     elif state == "failed":
@@ -561,7 +697,9 @@ def main() -> int:
     parser.add_argument("--drive-dir", default=os.environ.get("DRIVE_DIR", "Audiobooks-colab"),
                         help="папка внутри MyDrive")
     parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "60")),
-                        help="сколько секунд ждать подтверждения Drive (по умолчанию 60)")
+                        help="через сколько секунд нажать Enter и проверить доступ к Drive (60)")
+    parser.add_argument("--no-auto-enter", action="store_true",
+                        help="не нажимать Enter за меня: подтверждение придётся давать вручную")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
                         help="если книга длиннее — задание разрежет её на части (0 — не резать)")
     parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
@@ -650,6 +788,8 @@ def main() -> int:
 
     drive_ok = False
     if not args.no_drive:
+        if args.no_auto_enter:
+            os.environ["DRIVE_AUTO_ENTER"] = "0"
         drive_ok = mount_drive(colab, args.session, args.drive_wait, gpu=args.gpu,
                                open_links=args.open and not args.no_open)
         if drive_ok:
