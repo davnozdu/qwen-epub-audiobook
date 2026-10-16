@@ -47,6 +47,17 @@ def banner(text):
     print(f"\n{'=' * 74}\n{text}\n{'=' * 74}", flush=True)
 
 
+def auto_book():
+    """Книга не задана: берём единственный epub в /content или на подключённом Drive."""
+    roots = [pathlib.Path("/content"), pathlib.Path("/content/drive/MyDrive")]
+    found = sorted(p for root in roots if root.is_dir() for p in root.glob("*.epub"))
+    if len(found) == 1:
+        print("книга найдена автоматически:", found[0])
+        return str(found[0])
+    print("в /content найден не один epub:", [p.name for p in found])
+    return ""
+
+
 def find_book(name):
     """Имя файла, путь или ссылка → путь к epub на этой машине."""
     if name.startswith(("http://", "https://")):
@@ -162,7 +173,8 @@ def pack(args, book):
 
 def main():
     parser = argparse.ArgumentParser(description="EPUB → ZIP с аудиокнигой и read-along EPUB")
-    parser.add_argument("book", help="имя файла, путь или ссылка на epub")
+    parser.add_argument("book", nargs="?", default="",
+                        help="имя файла, путь или ссылка на epub (можно не задавать — возьмётся единственный в /content)")
     parser.add_argument("--out", default=None,
                         help="рабочий каталог проекта (по умолчанию /content/out/<имя книги>)")
     parser.add_argument("--zip", default=None, help="путь к архиву (по умолчанию рядом с --out)")
@@ -179,6 +191,13 @@ def main():
     if extra:
         print("лишние аргументы проигнорированы:", extra, flush=True)
     os.environ.setdefault("MLX_CUDA_CONV_CACHE_SIZE", "12288")     # иначе «Cache thrashing» на CUDA
+
+    if not args.book:                     # так задание работает и через `colab exec -f`, где аргументы не передать
+        args.book = os.environ.get("BOOK", "").strip() or auto_book()
+    if not args.book:
+        raise SystemExit("книга не задана: передайте имя файла или ссылку в аргументе, либо положите\n"
+                         "единственный epub в /content и запустите без аргументов:\n"
+                         "  colab upload -s <сессия> ~/Downloads/kniga.epub /content/kniga.epub")
 
     # каждому epub — свой каталог проекта: id сегментов у разных книг совпадают, кэши нельзя мешать
     stem = pathlib.Path(args.book.split("?")[0]).stem or "book"
