@@ -4,7 +4,9 @@
 
 | файл | что это |
 |---|---|
-| `qwen_tts_colab_full_book.ipynb` | **вся книга**: EPUB → манифест → ударения (словарь Supertonic + Silero) → синтез MLX/CUDA → музыка → **`book.m4b` + `book-read-along.epub`** |
+| `qwen_tts_book_cli.ipynb` | **запуск из терминала через Colab CLI**: параметры в первой ячейке, на выходе один zip с `book.m4b` + `book-read-along.epub` |
+| `qwen_tts_book.py` | то же задание скриптом: `colab run --gpu T4 --keep -s book colab/qwen_tts_book.py "kniga.epub"` — книга указывается сразу за именем файла |
+| `qwen_tts_colab_full_book.ipynb` | **вся книга в браузере**: EPUB → манифест → ударения (словарь Supertonic + Silero) → синтез MLX/CUDA → музыка → **`book.m4b` + `book-read-along.epub`** |
 | `qwen_tts_colab_check_all.ipynb` | один Run all: окружение, установка, правки репозитория с проверкой, RTF |
 | `qwen_tts_colab_smoke_mlx.ipynb` | только замер RTF на MLX |
 | `qwen_tts_colab_smoke_torch.ipynb` | план Б: torch/CUDA через официальный `qwen-tts` |
@@ -13,6 +15,33 @@
 | `../resources/Lamplight_and_Paper.mp3` | фоновая музыка, уже в репозитории (проверяется по sha256 в `mix_book_music.py`) |
 
 ## Как запустить
+
+### Из терминала, через Colab CLI (без браузера)
+
+```bash
+pip install google-colab-cli                                   # один раз
+
+colab new -s book --gpu T4                                     # сессия с GPU
+colab upload -s book ~/Downloads/kniga.epub /content/kniga.epub  # книга на машину
+colab exec -s book -f colab/qwen_tts_book_cli.ipynb             # блокнот с параметрами
+colab download -s book /content/out/kniga.zip ~/Downloads/      # архив с двумя файлами
+colab stop -s book                                              # освободить машину
+```
+
+Или одной строкой, книга сразу за именем файла (скриптовая форма):
+
+```bash
+colab run --gpu T4 --keep -s book colab/qwen_tts_book.py "kniga.epub"
+colab download -s book /content/out/kniga.zip ~/Downloads/
+colab stop -s book
+```
+
+В обоих случаях на выходе `/content/out/<имя книги>.zip` c `book.m4b` и `book-read-along.epub`
+внутри; путь, размер и sha256 печатаются в конце. Если Drive подключён (`colab drivemount -s book`),
+архив дополнительно копируется в `MyDrive/audiobooks/` — тогда `colab download` не нужен.
+Каталог проекта у каждой книги свой, поэтому кэши сегментов разных книг не перемешиваются.
+
+### В браузере
 
 1. Загрузите ноутбук в Colab (File → Upload notebook) и включите **Runtime → Change runtime type → T4 GPU**.
 2. `qwen_tts_colab_smoke_mlx.ipynb` → Run all → в диалоге выберите `~/Downloads/colab-ref/narrator.wav`.

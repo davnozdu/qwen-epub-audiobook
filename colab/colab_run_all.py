@@ -213,30 +213,35 @@ def stage_deps(args):
 def stage_repo(args):
     banner("repo", "Правки репозитория под Linux + словарь ударений")
     changes = []
-    for name in ("requirements.txt", "requirements-mlx.txt"):
-        path = REPO / name
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8")
-        patched = text.replace("mlx-metal==0.32.3", "mlx[cuda]==0.32.3")
-        if patched != text:
-            path.write_text(patched, encoding="utf-8")
-            changes.append(f"{name}: mlx-metal → mlx[cuda]")
-    for name in PATCH_FILES:
-        path = REPO / name
-        if not path.exists():
-            continue
-        text = path.read_text(encoding="utf-8")
-        patched = text.replace("/opt/homebrew/bin/", "/usr/bin/")
-        if patched != text:
-            path.write_text(patched, encoding="utf-8")
-            changes.append(f"{name}: пути ffmpeg → /usr/bin")
-    print("изменения:", changes or "нечего менять (уже пропатчено)")
+    # На macOS править нечего: пути Homebrew и mlx-metal там верные, и патч под Linux сломал бы
+    # локальный прогон (ffmpeg окажется в /usr/bin, которого на маке нет).
+    if sys.platform != "darwin":
+        for name in ("requirements.txt", "requirements-mlx.txt"):
+            path = REPO / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            patched = text.replace("mlx-metal==0.32.3", "mlx[cuda]==0.32.3")
+            if patched != text:
+                path.write_text(patched, encoding="utf-8")
+                changes.append(f"{name}: mlx-metal → mlx[cuda]")
+        for name in PATCH_FILES:
+            path = REPO / name
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            patched = text.replace("/opt/homebrew/bin/", "/usr/bin/")
+            if patched != text:
+                path.write_text(patched, encoding="utf-8")
+                changes.append(f"{name}: пути ffmpeg → /usr/bin")
+    print("изменения:", changes or ("macOS: правки под Linux не нужны" if sys.platform == "darwin"
+                                    else "нечего менять (уже пропатчено)"))
 
-    left = [f"{p.name}:{i}" for p in sorted(REPO.glob("*.py")) if p.name != "setup_audiobook.py"
-            for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
-            if "/opt/homebrew/bin" in line]
-    assert not left, f"остались маковыe пути: {left}"
+    if sys.platform != "darwin":
+        left = [f"{p.name}:{i}" for p in sorted(REPO.glob("*.py")) if p.name != "setup_audiobook.py"
+                for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+                if "/opt/homebrew/bin" in line]
+        assert not left, f"остались маковыe пути: {left}"
 
     dictionary_dir = REPO / "data" / "stress"
     dictionary_dir.mkdir(parents=True, exist_ok=True)
@@ -382,9 +387,13 @@ def stage_voices(args, source):
 def stage_prepare(args, project):
     banner("prepare", "Нарезка по предложениям + book-text.epub")
     source = project / "source"
-    if args.rebuild or not (source / "manifest.json").exists():
+    prepared = None
+    if (source / "manifest.json").exists() and not args.rebuild:
+        prepared = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    # Пересобираем, если нарезки нет или сменился режим подсветки: highlight_mode входит в манифест.
+    if prepared is None or prepared.get("highlight_mode") != args.highlight:
         cmd = [sys.executable, "audiobook_epub.py", "prepare", "--manifest", str(project / "manifest.json"),
-               "--out", str(source), "--highlight", "sentence", "--start-paragraph", "p00001"]
+               "--out", str(source), "--highlight", args.highlight, "--start-paragraph", "p00001"]
         if args.test_seconds:
             cmd += ["--seconds", str(args.test_seconds)]
         run(cmd)
@@ -500,6 +509,8 @@ def main():
                         help="сделать только фрагмент такой длительности, например 300")
     parser.add_argument("--model-dir", default=None, help="готовая папка с весами вместо скачивания")
     parser.add_argument("--voice", default=None, help="свой образец голоса вместо скачивания с GitHub")
+    parser.add_argument("--highlight", choices=["sentence", "fragment"], default="sentence",
+                        help="подсветка по предложениям (точнее) или по абзацам (меньше сегментов, быстрее)")
     parser.add_argument("--upto", choices=STAGES, default="package", help="остановиться на этой стадии")
     parser.add_argument("--rebuild", action="store_true", help="пересобрать манифест/аудио, даже если готово")
     parser.add_argument("--skip-install", action="store_true", help="не ставить зависимости")
