@@ -148,14 +148,19 @@ def supports_hyperlinks() -> bool:
     return any(name in term for name in ("kitty", "wezterm", "ghostty", "alacritty"))
 
 
-def clickable(url: str) -> str:
-    """Ссылка: подсвечена в любом терминале, а где есть гиперссылки — ещё и кликабельна.
+def is_drive_auth(url: str) -> bool:
+    """Это та самая ссылка авторизации Google Drive, которую выдаёт CLI."""
+    return "accounts.google.com" in url and "/o/oauth2/" in url
 
-    В логах (вывод не в терминал) не раскрашиваем: подсветка нужна человеку, а не автоматизации.
+
+def clickable(url: str) -> str:
+    """Ссылка авторизации: подсвечена в любом терминале, а где есть гиперссылки — ещё и кликабельна.
+
+    В логи (вывод не в терминал) ничего не подмешиваем: подсветка нужна человеку, а не автоматизации.
     """
     if not sys.stdout.isatty():
         return url
-    text = f"\x1b[4;36m{url}\x1b[0m"          # подчёркнутый голубой: видно и в Apple Terminal
+    text = f"\x1b[1;4;36m{url}\x1b[0m"          # жирный подчёркнутый голубой
     if supports_hyperlinks():
         return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
     return text
@@ -177,19 +182,48 @@ def open_browser(url: str) -> None:
         print(f"  (браузер открыть не вышло: {exc})", flush=True)
 
 
-def stream_step(cmd, timeout: float, open_links: bool = True):
-    """Запуск шага с живым выводом, ссылками и потолком по времени.
+def stream_step(cmd, timeout: float, open_links: bool = False):
+    """Запуск шага с живым выводом и потолком по времени.
 
-    Вывод печатаем сразу, кусками (не по строкам): CLI пишет приглашение «Press Enter…» без
-    перевода строки, и построчное чтение его съедало. Заодно, увидев ссылку авторизации,
-    открываем браузер и печатаем её кликабельной.
+    Вывод печатаем сразу, кусками: CLI пишет приглашение «Press Enter…» без перевода строки,
+    и построчное чтение его съедало.
+
+    Украшаем вывод только там, где терминал умеет гиперссылки (iTerm2, WezTerm, VS Code, Warp,
+    Ghostty, kitty). В Apple Terminal гиперссылок нет — там отдаём поток как есть, без подсветки:
+    длинную ссылку всё равно открывают ⌘-кликом. Если явно попросили --open, ссылку находим,
+    но по-прежнему ничего не раскрашиваем.
     """
     import select
 
+    decorate = sys.stdout.isatty()        # в терминале подсвечиваем, в логах — ничего лишнего
+    collect = decorate or open_links
     process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ),
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     LIVE_CHILDREN.append(process)
-    window, opened, state = "", set(), "ok"
+    tail, opened, state, links = "", set(), "ok", []
+
+    def emit(chunk, final=False):
+        """Печатаем поток; ссылки подсвечиваем на месте — токен может прийти по частям."""
+        nonlocal tail
+        if not collect:
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+            return
+        tail += chunk
+        pieces = re.split(r"(\s+)", tail)
+        if not final and not tail[-1:].isspace():
+            tail = pieces.pop() if pieces else ""
+        else:
+            tail = ""
+        for piece in pieces:
+            if piece.startswith(("http://", "https://")) and is_drive_auth(piece):
+                sys.stdout.write(clickable(piece))     # подсвечиваем только ссылку авторизации Drive
+                if piece not in links:
+                    links.append(piece)
+            else:
+                sys.stdout.write(piece)                # прочие ссылки не трогаем
+        sys.stdout.flush()
+
     deadline = time.monotonic() + max(1.0, timeout)
     try:
         while True:
@@ -207,16 +241,17 @@ def stream_step(cmd, timeout: float, open_links: bool = True):
             chunk = os.read(process.stdout.fileno(), 4096).decode("utf-8", "replace")
             if not chunk:
                 break
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-            window = (window + chunk)[-600:]
-            for url in re.findall(r"https://[^\s\x1b]+", window):
+            emit(chunk)
+        emit("", final=True)                       # хвост без пробела всё равно печатаем
+        if decorate and links:
+            hint = "обычный клик" if supports_hyperlinks() else "⌘-клик"
+            print(f"\n   ссылка авторизации Drive ({hint}): " + clickable(links[0]), flush=True)
+        if open_links:
+            for url in links or []:
                 if url not in opened:
                     opened.add(url)
-                    print(f"\n   ссылка для подтверждения (⌘-клик в Apple Terminal, обычный клик в iTerm2):"
-                          f"\n   {clickable(url)}\n", flush=True)
-                    if open_links:
-                        open_browser(url)
+                    print(f"\n   открываю браузер: {url}", flush=True)
+                    open_browser(url)
         if state == "timeout":
             kill_tree(process)
         else:
