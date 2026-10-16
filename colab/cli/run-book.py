@@ -193,27 +193,41 @@ def stop_stale_sessions(colab: str) -> str:
     return list_sessions(colab)
 
 
+def drive_is_mounted(colab: str, session: str) -> bool:
+    """Спрашиваем саму машину: Enter без подтверждения доступа тоже даёт код 0 у CLI."""
+    done = subprocess.run([colab, "exec", "-s", session],
+                          input='import os; print("DRIVE_OK", os.path.isdir("/content/drive/MyDrive"))\n',
+                          text=True, capture_output=True, encoding="utf-8", errors="replace",
+                          timeout=180, env=dict(os.environ))
+    return "DRIVE_OK True" in (done.stdout or "")
+
+
 def mount_drive(colab: str, session: str, wait_seconds: int) -> bool:
-    """Подключает Drive с ожиданием wait_seconds. Возвращает True только если монтирование есть."""
+    """Подключает Drive. Возвращает True только если монтирование действительно есть.
+
+    wait_seconds — это потолок ожидания, а не обязательная пауза: как только пользователь нажал
+    Enter после авторизации, CLI дорабатывает монтирование и обёртка идёт дальше сразу.
+    """
     print("\n== подключаю Google Drive (если появится ссылка — разрешить доступ и нажать Enter) ==")
-    print(f"   ждём {wait_seconds} с: не успели — задание поедет без Drive, архив заберём локально")
+    print(f"   ждём подтверждения до {wait_seconds} с: как только нажмёте Enter — едем дальше;")
+    print("   не дождались — задание поедет без Drive, архив заберём локально")
     print("   если CLI напишет «Press Enter after you have granted access» — вернитесь сюда и нажмите Enter")
     state = run_with_timeout([colab, "drivemount", "-s", session], timeout=wait_seconds)
     if state == "timeout":
         print(f"  за {wait_seconds} с подтверждения не было — снимаю попытку, Drive пропускаем.")
-    elif state == "failed":
+        print("  едем без Drive: архив всё равно заберём в загрузки.")
+        return False
+    if state == "failed":
         print("  Drive не подключился (или доступ не подтверждён).")
+        print("  едем без Drive: архив всё равно заберём в загрузки.")
+        return False
 
-    # Enter без подтверждения доступа: CLI может завершиться «успешно», а монтирования нет —
-    # поэтому смотрим на машину, а не на код возврата.
-    if state == "ok":
-        check = subprocess.run([colab, "exec", "-s", session],
-                               input='import os; print("DRIVE_OK", os.path.isdir("/content/drive/MyDrive"))\n',
-                               text=True, capture_output=True, encoding="utf-8", errors="replace",
-                               timeout=180, env=dict(os.environ))
-        if "DRIVE_OK True" in (check.stdout or ""):
+    # Только что смонтированный Drive виден не мгновенно, поэтому спрашиваем машину несколько раз.
+    for attempt in range(6):
+        if drive_is_mounted(colab, session):
             return True
-        print("  Drive не подключился (или доступ не подтверждён).")
+        time.sleep(2)
+    print("  монтирования не видно (или доступ не подтверждён).")
     print("  едем без Drive: архив всё равно заберём в загрузки.")
     return False
 
