@@ -17,9 +17,13 @@
 и веса уже на машине. Каталог проекта у каждой книги свой (по имени файла), поэтому книги
 не перемешиваются.
 
-Локально (macOS, Metal) то же самое, без установки и без проверки GPU:
+Локально (macOS, Metal) то же самое, без установки и без проверки GPU (веса ищутся сами,
+конвейер при необходимости клонируется в ~/.cache/qwen-epub-audiobook):
 
-    python colab/cli/qwen_tts_book.py kniga.epub --local --model-dir "<папка с весами>"
+    python qwen_tts_book.py kniga.epub --local
+
+Если файл лежит внутри копии репозитория, конвейер берётся оттуда и ничего не клонируется;
+если рядом репозитория нет (файл скопировали отдельно) — клонируется в ~/.cache.
 
 Сам конвейер не переписывается: вся работа стадий — в colab/colab_run_all.py, этот файл
 только находит книгу, запускает конвейер, упаковывает результат в zip и печатает итог.
@@ -37,9 +41,25 @@ import urllib.request
 import zipfile
 
 REPO_URL = "https://github.com/davnozdu/qwen-epub-audiobook.git"
-REPO_DIR = pathlib.Path("/content/qwen-epub-audiobook")
+ON_COLAB = pathlib.Path("/content").is_dir()
+REPO_DIR = (pathlib.Path("/content/qwen-epub-audiobook") if ON_COLAB
+            else pathlib.Path.home() / ".cache" / "qwen-epub-audiobook")
 MODEL_NAME = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
-MODEL_DIR = pathlib.Path("/content/models") / MODEL_NAME
+MODEL_HINTS = (pathlib.Path.home() / "Library/Application Support/Audiobook Studio/Engine/models",
+               pathlib.Path.home() / ".cache/qwen-tts-models")
+
+
+def default_model_dir() -> pathlib.Path:
+    """Где искать веса: на Colab — /content/models, локально — знакомые места, иначе кэш."""
+    if ON_COLAB:
+        return pathlib.Path("/content/models") / MODEL_NAME
+    for hint in MODEL_HINTS:
+        if (hint / MODEL_NAME).is_dir():
+            return hint / MODEL_NAME
+    return pathlib.Path.home() / ".cache/qwen-tts-models" / MODEL_NAME
+
+
+MODEL_DIR = default_model_dir()
 RESULT_FILES = ("book.m4b", "book-read-along.epub")
 
 
@@ -61,7 +81,8 @@ def auto_book():
 def find_book(name):
     """Имя файла, путь или ссылка → путь к epub на этой машине."""
     if name.startswith(("http://", "https://")):
-        target = pathlib.Path("/content") / pathlib.Path(name.split("?")[0]).name
+        target = (pathlib.Path("/content") if ON_COLAB else pathlib.Path.cwd()) \
+            / pathlib.Path(name.split("?")[0]).name
         banner(f"Скачиваю книгу: {name}")
         urllib.request.urlretrieve(name, target)
         print("скачано:", target, target.stat().st_size, "байт")
@@ -94,13 +115,16 @@ def ensure_runner(repo_url, repo_dir):
     значит, что рядом с нами репозитория нет и его надо клонировать.
     """
     here = globals().get("__file__")
-    near = pathlib.Path(here).resolve().parent / "colab_run_all.py" if here else None
-    if near is not None and near.is_file():
-        print("использую конвейер из этой копии репозитория:", near)
-        return near
+    if here:
+        folder = pathlib.Path(here).resolve().parent
+        for candidate in (folder / "colab_run_all.py", folder.parent / "colab_run_all.py"):
+            if candidate.is_file():
+                print("использую конвейер из этой копии репозитория:", candidate)
+                return candidate
 
-    repo_dir = pathlib.Path(repo_dir)
+    repo_dir = pathlib.Path(repo_dir).expanduser()
     banner(f"Репозиторий: {repo_url} → {repo_dir}")
+    repo_dir.parent.mkdir(parents=True, exist_ok=True)
     if (repo_dir / ".git").is_dir():
         subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"], check=False)
     else:
