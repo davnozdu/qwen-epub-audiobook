@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -209,6 +210,25 @@ def mount_drive(colab: str, session: str, wait_seconds: int) -> bool:
 
 
 # ────────────────────────────── файлы и пути ──────────────────────────────
+def keep_awake():
+    """macOS: caffeinate, чтобы мак не заснул посреди работы (сон рвёт сессию Colab).
+
+    Процесс живёт ровно столько, сколько живём мы: caffeinate -w <наш pid>.
+    В конце убиваем сами — atexit срабатывает на любом выходе, включая ранние ошибки.
+    """
+    if sys.platform != "darwin":
+        return None
+    caffeinate = shutil.which("caffeinate")
+    if not caffeinate:
+        return None
+    process = subprocess.Popen([caffeinate, "-i", "-s", "-w", str(os.getpid())],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               env=dict(os.environ))
+    print(f"мак не заснёт во время работы: caffeinate -i -s -w {os.getpid()} (pid {process.pid})")
+    atexit.register(lambda: process.terminate())
+    return process
+
+
 def downloads_dir() -> pathlib.Path:
     """Папка загрузок на любой системе (на Windows — профиль пользователя)."""
     candidates = [pathlib.Path.home() / "Downloads",
@@ -276,6 +296,9 @@ def main() -> int:
                         help="папка внутри MyDrive")
     parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "120")),
                         help="сколько секунд ждать подтверждения Drive")
+    parser.add_argument("--no-caffeinate", action="store_true",
+                        default=os.environ.get("CAFFEINATE", "1") == "0",
+                        help="macOS: не мешать маку засыпать (по умолчанию мешаем)")
     args, extra = parser.parse_known_args()
     if extra:
         print("лишние аргументы проигнорированы:", extra, flush=True)
@@ -290,6 +313,8 @@ def main() -> int:
         print(f"рядом с этим файлом нет qwen_tts_book.py ({here})")
         return 1
     colab = find_colab()
+    if not args.no_caffeinate:
+        keep_awake()          # macOS: иначе сон может оборвать сессию Colab
 
     if args.book.startswith(("http://", "https://")):
         book = fetch_book(args.book, downloads_dir())

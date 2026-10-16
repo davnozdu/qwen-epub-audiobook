@@ -39,6 +39,7 @@
 | `DRIVE=1` | подключить Google Drive и положить `book.m4b` и read-along epub в `MyDrive/Audiobooks-colab/<имя книги>` (по умолчанию 1; `DRIVE=0` — не подключать) |
 | `DRIVE_DIR=...` | другая папка внутри `MyDrive` (по умолчанию `Audiobooks-colab`) |
 | `DRIVE_WAIT=120` | сколько секунд ждать подтверждения Drive, потом продолжить без него |
+| `CAFFEINATE=0` | macOS: не мешать маку засыпать (по умолчанию обёртка держит его бодрым) |
 
 Примеры:
 
@@ -100,6 +101,10 @@
 Работает одинаково: путь к CLI ищется в `PATH`, потом в `~/.local/bin` и в папках `uv tool install`
 (на Windows — `%USERPROFILE%\.local\bin`, `%APPDATA%\uv\tools\...`). Хеш архива считается через
 `hashlib`, зависшее подключение Drive глушится через `kill` (POSIX) или `taskkill /T` (Windows).
+
+На macOS обёртка сама запускает `caffeinate -i -s -w <свой pid>`: пока идёт работа, мак не
+уходит в сон (сон рвёт сессию Colab), а вместе с обёрткой caffeinate гаснет. Отключить:
+`CAFFEINATE=0` или `--no-caffeinate`.
 
 Локальный синтез на своём компьютере (`--local`, MLX/Metal) возможен только на macOS —
 он не входит ни в `run-book.py`, ни в обёртки поверх Colab. Windows и Linux работают как
