@@ -535,6 +535,12 @@ def main() -> int:
         os.environ["TELEGRAM_BOT_TOKEN"] = args.telegram_token
     if args.telegram_chat:
         os.environ["TELEGRAM_CHAT_ID"] = args.telegram_chat
+    try:
+        import telegram_notify                                   # чат из прошлых запусков
+        if not os.environ.get("TELEGRAM_CHAT_ID") and telegram_notify.saved_chat():
+            os.environ["TELEGRAM_CHAT_ID"] = telegram_notify.saved_chat()
+    except Exception:
+        pass
     if os.environ.get("TELEGRAM_BOT_TOKEN") and not os.environ.get("TELEGRAM_CHAT_ID"):
         # Первый запуск с ключом: чат узнаём, как только боту напишут (бот не может писать первым).
         try:

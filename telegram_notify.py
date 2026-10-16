@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import pathlib
 import urllib.error
 import urllib.parse
 import urllib.request
 
 TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
+CONFIG_ENV = "TELEGRAM_CONFIG"
 CHAT_ENV = "TELEGRAM_CHAT_ID"
 API = "https://api.telegram.org/bot{token}/{method}"
 WARNED = set()          # чтобы не повторять одну и ту же подсказку на каждой стадии
@@ -56,6 +58,37 @@ def discover_chat(token: str) -> str:
     return chats[-1] if chats else ""
 
 
+def config_path() -> "os.PathLike[str]":
+    raw = os.environ.get(CONFIG_ENV) or os.path.join(os.path.expanduser("~"), ".config", "qwen-book",
+                                                    "telegram.json")
+    return os.path.expanduser(raw)
+
+
+def saved_chat() -> str:
+    """Чат, найденный в прошлый раз: тогда ни Start, ни поиск не нужны."""
+    try:
+        return str(json.loads(open(config_path(), encoding="utf-8").read()).get("chat") or "")
+    except Exception:
+        return ""
+
+
+def save_chat(chat: str) -> None:
+    """Запоминаем чат локально (это не секрет и не в репозитории)."""
+    try:
+        path = pathlib.Path(config_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:
+                data = {}
+        data["chat"] = chat
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def bot_username(token: str) -> str:
     try:
         return _call(token, "getMe").get("result", {}).get("username", "")
@@ -78,7 +111,8 @@ def wait_for_chat(token: str, seconds: float = 60.0, log=print) -> str:
     while _time.monotonic() < deadline:
         chat = discover_chat(token)
         if chat:
-            log(f"   Telegram: чат найден — {chat}; дальше сообщения пойдут туда.")
+            save_chat(chat)
+            log(f"   Telegram: чат найден — {chat}; запомнил его, больше Start не потребуется.")
             return chat
         _time.sleep(3)
     log("   Telegram: не дождался — уведомлений не будет, сборка идёт как обычно.")
@@ -90,9 +124,11 @@ def notify(text: str, token: str | None = None, chat: str | None = None, log=pri
     token = (token or token_from_env()).strip()
     if not token:
         return False
-    chat = (chat or chat_from_env()).strip()
+    chat = (chat or chat_from_env() or saved_chat()).strip()
     if not chat:
         chat = discover_chat(token)
+        if chat:
+            save_chat(chat)
         if not chat:
             if "nochat" not in WARNED:
                 WARNED.add("nochat")
