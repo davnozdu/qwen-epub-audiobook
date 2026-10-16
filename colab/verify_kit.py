@@ -292,6 +292,18 @@ def main() -> int:
           "shrink_book.py: есть откат на нормализованный текст конвейера")
     check("Audiobooks-shrink" in splitter and '"plan.json"' in splitter.replace("'", '"'),
           "shrink_book.py: пишет план нарезки и папку для частей на Drive")
+    # Статика: неопределённые имена в скриптах ловятся до прогона. Именно так всплыл NameError
+    # на стадии зависимостей — уведомление ссылалось на переменную, которой в области видимости нет.
+    try:
+        lint = subprocess.run([PY, "-m", "pyflakes", *[str(p) for p in sorted(clone.rglob("*.py"))
+                                                       if ".git" not in p.parts]],
+                              capture_output=True, text=True, cwd=clone, env=dict(os.environ))
+        undefined = [line for line in (lint.stdout or "").splitlines()
+                     if "undefined name" in line or "is not defined" in line]
+        check(not undefined, f"в скриптах нет неопределённых имён: {undefined[:3]}")
+    except FileNotFoundError:
+        print("  (pyflakes не установлен — статическую проверку имён пропускаю)")
+
     job_text = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
     check("book = shrink_step(" in job_text and "def shrink_step(" in job_text,
           "задание режет толстую книгу перед конвейером и продолжает с первой части")

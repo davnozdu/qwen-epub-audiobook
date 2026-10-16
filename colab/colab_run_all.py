@@ -227,10 +227,12 @@ def stage_deps(args):
         print("✓ зависимости проверены без MLX")
         return
     device = mx.default_device()
+    machine = str(device)
     on_gpu = "gpu" in str(device).lower()
     print("  default device  :", device, "| это GPU:", on_gpu)
     try:
         info = mx.device_info()
+        machine = f"{info.get('device_name')} {info.get('architecture', '')}".strip() or str(device)
         print("  device info     :", info.get("device_name"), info.get("architecture"),
               f"{info.get('total_memory', 0) / 2 ** 30:.1f} ГБ")
     except Exception as exc:
@@ -240,7 +242,7 @@ def stage_deps(args):
     if not on_gpu:
         print("  (--skip-gpu-check: продолжаю без GPU, синтез на этой машине работать не будет)")
     print("✓ зависимости и MLX на месте")
-    tg(f"🚀 Собралось начать\nкнига: {Path(args.book).name}\nмашина: {gpu or 'CPU'}")
+    tg(f"🚀 Собралось начать\nкнига: {Path(args.book).name}\nмашина: {machine}")
 
 
 # ─────────────────────────── 3. репозиторий ───────────────────────────
