@@ -58,12 +58,28 @@ STAGES = ["env", "deps", "repo", "model", "manifest", "prepare", "stress", "voic
           "synth", "normalize", "music", "package"]
 # setup_audiobook.py не патчим: это локальная установка на macOS, на арендованной машине он не нужен.
 PATCH_SKIP = {"setup_audiobook.py", "colab_run_all.py"}
-# Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing».
-# Лимит — это потолок, а не резервация: память берётся по мере надобности, поэтому на T4 с её
-# ~15 ГБ ставим 12288 МБ и не экономим (при 8192 трэшинг ещё ловится). Ступени ниже поднимают
-# потолок дальше, если и этого не хватит.
-CONV_CACHE_MB = 12288
-CONV_CACHE_STEPS = (CONV_CACHE_MB, 16384)
+# Кэши MLX/CUDA измеряются в ЗАПИСЯХ, а не в мегабайтах, и по умолчанию они крошечные:
+# свёртки 128, граф 400, внимание 256, обратное внимание 64, FFT 128 (docs ml-explore/mlx,
+# environment_variables.rst). Когда записей не хватает, MLX печатает «Cache thrashing is
+# happening, please set the environment variable <имя> to a larger value than <N>» и синтез
+# падает на середине книги — уже дважды: сначала на свёртках, потом на графах.
+# Ставим потолки с запасом: это лимит на число записей, а не резервация памяти.
+CACHE_ENTRIES = {
+    "MLX_CUDA_CONV_CACHE_SIZE": 12288,
+    "MLX_CUDA_GRAPH_CACHE_SIZE": 8192,
+    "MLX_CUDA_SDPA_CACHE_SIZE": 4096,
+    "MLX_CUDA_SDPA_BACKWARD_CACHE_SIZE": 1024,
+    "MLX_CUDA_FFT_CACHE_SIZE": 1024,
+}
+
+
+def _cache_env(factor):
+    return {name: str(value * factor) for name, value in CACHE_ENTRIES.items()}
+
+
+# Ступени на случай, если и этих потолков мало: удваиваем, а последней ступенью выключаем саму
+# проверку — лучше закончить книгу с просадкой скорости, чем потерять весь прогон.
+CACHE_STEPS = [_cache_env(1), _cache_env(2), _cache_env(4), {"MLX_ENABLE_CACHE_THRASHING_CHECK": "0"}]
 
 
 def banner(step, text):
@@ -78,16 +94,15 @@ def run(cmd, **kwargs):
     return code
 
 
-def run_capture(cmd, cache_mb=None, **kwargs):
+def run_capture(cmd, extra_env=None, **kwargs):
     """То же, но возвращает (код, хвост вывода): по нему распознаётся Cache thrashing.
 
-    cache_mb задаёт MLX_CUDA_CONV_CACHE_SIZE этому дочернему процессу явно, не надеясь
-    на унаследованное окружение.
+    extra_env задаёт переменные кэшей этому дочернему процессу явно, не надеясь на унаследованное
+    окружение.
     """
     print("+", " ".join(str(part) for part in cmd), flush=True)
     env = dict(os.environ, PYTHONPATH=str(REPO) + os.pathsep + os.environ.get("PYTHONPATH", ""))
-    if cache_mb:
-        env["MLX_CUDA_CONV_CACHE_SIZE"] = str(cache_mb)
+    env.update(extra_env or {})
     process = subprocess.Popen([str(part) for part in cmd], cwd=str(kwargs.pop("cwd", REPO)), env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, bufsize=1)
@@ -102,10 +117,11 @@ def run_capture(cmd, cache_mb=None, **kwargs):
 
 # ─────────────────────────── 1. окружение ───────────────────────────
 def stage_env(args):
-    # Кэш свёрток MLX/CUDA: по умолчанию 128, и синтез падает посреди работы с «Cache thrashing
-    # is happening, please set the environment variable MLX_CUDA_CONV_CACHE_SIZE to a larger
-    # value than 128». Ставим до запуска дочерних процессов — они наследуют окружение.
-    os.environ.setdefault("MLX_CUDA_CONV_CACHE_SIZE", str(CONV_CACHE_MB))
+    # Кэши MLX/CUDA: по умолчанию 128/400/256/64/128 записей, и синтез падает посреди книги
+    # с «Cache thrashing is happening, please set the environment variable ... to a larger
+    # value than N». Ставим до запуска дочерних процессов — они наследуют окружение.
+    for name, value in CACHE_ENTRIES.items():
+        os.environ.setdefault(name, str(value))
     banner("env", "Окружение: GPU, glibc, ffmpeg")
     import platform
 
@@ -441,19 +457,26 @@ def stage_synth(args, source, library, model_dir):
 
     if args.rebuild or not (audio / "benchmark.json").exists():
         run(command + ["--plan"])
-        # Ступени кэша свёрток: при «Cache thrashing» процесс падает — повторяем с удвоенным
-        # кэшем, уже синтезированные сегменты берутся из кэша, работа не теряется.
-        for cache_mb in CONV_CACHE_STEPS:
+        # Ступени кэшей: при «Cache thrashing» MLX сам называет переменную и потолок, которого
+        # не хватило, — повторяем с удвоенными потолками, уже синтезированные сегменты берутся
+        # из кэша, работа не теряется. Последняя ступень выключает проверку совсем.
+        for index, step_env in enumerate(CACHE_STEPS, 1):
             started = time.time()
-            code, log = run_capture(command, cache_mb=cache_mb)
+            code, log = run_capture(command, extra_env=step_env)
             if code == 0:
-                print(f"синтез занял {time.time() - started:.0f} с; кэш свёрток MLX/CUDA — {cache_mb} МБ")
+                values = ", ".join(f"{name.split('_')[2].lower()} {value}" for name, value in step_env.items())
+                print(f"синтез занял {time.time() - started:.0f} с; кэши MLX/CUDA: {values or '—'}")
                 break
-            if "Cache thrashing" in log and cache_mb != CONV_CACHE_STEPS[-1]:
-                print(f"\nсинтез упал на кэше {cache_mb} МБ (Cache thrashing) — повторяю с "
-                      f"{CONV_CACHE_STEPS[CONV_CACHE_STEPS.index(cache_mb) + 1]} МБ", flush=True)
+            missing = re.search(r"environment variable (\w+) to a larger value than (\d+)", log)
+            if index < len(CACHE_STEPS):
+                if missing:
+                    print(f"\nсинтез упал: мало записей в {missing.group(1)} (нужно больше "
+                          f"{missing.group(2)}) — повторяю со ступенью {index + 1} "
+                          f"({'; '.join(f'{n}={v}' for n, v in CACHE_STEPS[index].items())})", flush=True)
+                else:
+                    print(f"\nсинтез упал с кодом {code} — повторяю со ступенью {index + 1}", flush=True)
                 continue
-            raise SystemExit(f"синтез упал с кодом {code} (кэш свёрток {cache_mb} МБ)")
+            raise SystemExit(f"синтез упал с кодом {code} (кэши MLX/CUDA пройдены до последней ступени)")
     else:
         print("аудио уже собрано:", audio / "benchmark.json")
 

@@ -232,7 +232,14 @@ def main():
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)
     if extra:
         print("лишние аргументы проигнорированы:", extra, flush=True)
-    os.environ.setdefault("MLX_CUDA_CONV_CACHE_SIZE", "12288")     # иначе «Cache thrashing» на CUDA
+    # Кэши MLX/CUDA считаются в записях и по умолчанию они крошечные (свёртки 128, граф 400,
+    # внимание 256/64, FFT 128): при исчерпании синтез падает на середине книги с
+    # «Cache thrashing is happening, please set the environment variable ... to a larger value».
+    for cache_name, cache_value in {"MLX_CUDA_CONV_CACHE_SIZE": 12288, "MLX_CUDA_GRAPH_CACHE_SIZE": 8192,
+                                    "MLX_CUDA_SDPA_CACHE_SIZE": 4096,
+                                    "MLX_CUDA_SDPA_BACKWARD_CACHE_SIZE": 1024,
+                                    "MLX_CUDA_FFT_CACHE_SIZE": 1024}.items():
+        os.environ.setdefault(cache_name, str(cache_value))
 
     if not args.book:                     # так задание работает и через `colab exec -f`, где аргументы не передать
         args.book = os.environ.get("BOOK", "").strip() or auto_book()

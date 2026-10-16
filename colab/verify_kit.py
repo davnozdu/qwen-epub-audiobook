@@ -279,6 +279,10 @@ def main() -> int:
           "colab_run_all.py: библиотека голосов берёт идентичность из подготовленного манифеста")
     check('MLX_CUDA_CONV_CACHE_SIZE' in all_stages,
           "colab_run_all.py: кэш свёрток MLX/CUDA увеличен до запуска синтеза")
+    check('MLX_CUDA_GRAPH_CACHE_SIZE' in all_stages,
+          "colab_run_all.py: кэш графов MLX/CUDA тоже увеличен (на нём синтез падал следом)")
+    check('MLX_ENABLE_CACHE_THRASHING_CHECK' in all_stages and 're.search' in all_stages,
+          "colab_run_all.py: разбирает имя переменной из сообщения MLX и имеет последнюю ступень")
 
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/**/*.ipynb")):
@@ -378,12 +382,14 @@ def main() -> int:
                     check(False, f"ячейка «{labels.get(index, index)}»: {type(exc).__name__}: {exc}")
         check((work / "audiobook/project/source/book-text.epub").is_file(), "ноутбук дошёл до book-text.epub")
 
-        # Переменная, из-за которой синтез падал на CUDA, должна доехать до дочернего процесса.
-        code_env, out_env = sh([PY, "-c", "import os;print(os.environ.get('MLX_CUDA_CONV_CACHE_SIZE', ''))"],
-                               worktree)
-        value = out_env.strip()
-        check(code_env == 0 and value.isdigit() and int(value) >= 4096,
-              f"дочерний процесс синтеза видит MLX_CUDA_CONV_CACHE_SIZE={value or '—'} (нужно ≥ 4096)")
+        # Переменные, из-за которых синтез падал на CUDA, должны доехать до дочернего процесса.
+        code_env, out_env = sh([PY, "-c", "import os;print(os.environ.get('MLX_CUDA_CONV_CACHE_SIZE',''),"
+                                              "os.environ.get('MLX_CUDA_GRAPH_CACHE_SIZE',''))"], worktree)
+        parts = out_env.split()
+        conv, graph = (parts + ["", ""])[:2]
+        check(code_env == 0 and conv.isdigit() and int(conv) >= 4096
+              and graph.isdigit() and int(graph) >= 1024,
+              f"дочерний процесс синтеза видит кэши MLX/CUDA: свёртки {conv or '—'}, граф {graph or '—'}")
 
     section("ИТОГ")
     if PROBLEMS:
