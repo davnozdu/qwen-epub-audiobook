@@ -24,6 +24,8 @@
   KEEP_SESSION=1      не гасить машину в конце (потом: colab stop -s book)
   DRIVE=1             положить book.m4b и read-along epub в MyDrive/<DRIVE_DIR>/<имя книги>
   DRIVE_DIR=...       папка внутри MyDrive (по умолчанию Audiobooks-colab)
+  OUT_DIR=…           куда складывать готовый архив (по умолчанию ~/Downloads)
+  STOP_ON_FAILURE=1   гасить машину Colab и при неудаче (для контейнера и фоновых запусков)
   DRIVE_WAIT=60       через сколько секунд нажать Enter и проверить доступ к Drive
   DRIVE_AUTO_ENTER=0  не нажимать Enter автоматически (подтверждать вручную)
 """
@@ -636,7 +638,12 @@ def keep_awake():
 
 
 def downloads_dir() -> pathlib.Path:
-    """Папка загрузок на любой системе (на Windows — профиль пользователя)."""
+    """Куда складывать готовый архив: OUT_DIR, иначе папка загрузок текущей системы."""
+    override = os.environ.get("OUT_DIR", "").strip()
+    if override:
+        path = pathlib.Path(override).expanduser()
+        path.mkdir(parents=True, exist_ok=True)
+        return path
     candidates = [pathlib.Path.home() / "Downloads",
                   pathlib.Path(os.environ.get("USERPROFILE", "")) / "Downloads"]
     for candidate in candidates:
@@ -730,6 +737,9 @@ def main() -> int:
                         help="папка внутри MyDrive")
     parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "60")),
                         help="через сколько секунд нажать Enter и проверить доступ к Drive (60)")
+    parser.add_argument("--stop-on-failure", action="store_true",
+                        default=os.environ.get("STOP_ON_FAILURE", "0") not in ("0", "", "no", "false"),
+                        help="гасить машину и при неудаче: ничего не оставляем запущенным")
     parser.add_argument("--no-auto-enter", action="store_true",
                         help="не нажимать Enter за меня: подтверждение придётся давать вручную")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
@@ -741,6 +751,8 @@ def main() -> int:
     parser.add_argument("--open", action="store_true", default=os.environ.get("AUTO_OPEN", "0") == "1",
                         help="открывать браузер со ссылкой авторизации Drive "
                              "(по умолчанию выключено: ссылка просто подсвечивается)")
+    parser.add_argument("--out-dir", default=os.environ.get("OUT_DIR"),
+                        help="куда складывать готовый архив (по умолчанию ~/Downloads)")
     parser.add_argument("--telegram-token", default=None,
                         help="ключ бота от @BotFather: шлём стадии и итог в Telegram")
     parser.add_argument("--telegram-chat", default=None,
@@ -778,6 +790,9 @@ def main() -> int:
             chat = ""
         if chat:
             os.environ["TELEGRAM_CHAT_ID"] = chat
+
+    if args.out_dir:                            # бот в контейнере складывает архив в свой том
+        os.environ["OUT_DIR"] = str(args.out_dir)
 
     here = pathlib.Path(__file__).resolve().parent
     job = here / "qwen_tts_book.py"
@@ -856,11 +871,24 @@ def main() -> int:
     local_zip = downloads_dir() / f"{effective}.zip"
 
     # Машину при неудаче НЕ гасим: готовый архив может уже лежать на ней, а после stop он пропадёт.
-    if run([colab, "download", "-s", args.session, remote_zip, str(local_zip)]).returncode != 0:
-        print("архива на машине нет (или он ещё собирается). Машину не гашу, чтобы не потерять работу.")
-        print("дальше вручную:")
-        print(f"  colab download -s {args.session} {remote_zip} {local_zip}")
-        print(f"  colab stop -s {args.session}")
+    downloaded = run([colab, "download", "-s", args.session, remote_zip, str(local_zip)]).returncode == 0
+    if not downloaded:
+        print("архив не забрался — пробую ещё раз (бывает сетевая осечка)")
+        downloaded = run([colab, "download", "-s", args.session, remote_zip,
+                          str(local_zip)]).returncode == 0
+    if not downloaded:
+        print("архива на машине нет (или он ещё собирается).")
+        if args.stop_on_failure:
+            print("== освобождаю машину (--stop-on-failure: ничего не оставляем запущенным) ==")
+            run_quiet([colab, "stop", "-s", args.session])
+            notify_telegram(f"⚠️ Архив для «{stem}» не забрался; машина освобождена "
+                            f"(сессия {args.session} остановлена).")
+        else:
+            print("машину не гашу, чтобы не потерять работу. Дальше вручную:")
+            print(f"  colab download -s {args.session} {remote_zip} {local_zip}")
+            print(f"  colab stop -s {args.session}")
+            notify_telegram(f"⚠️ Архив для «{stem}» не забрался, машина оставлена запущенной "
+                            f"(сессия {args.session}).\nОсвободить: colab stop -s {args.session}")
         return 1
     if local_zip.is_file():
         print(f"{sha256_of(local_zip)}  {local_zip.name}")
