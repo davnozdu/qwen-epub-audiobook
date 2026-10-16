@@ -144,13 +144,26 @@ PY
 
 echo
 echo "== задание =="
-colab exec -s "$SESSION" -f "$GENERATED" || fail
+# --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
+set +e
+colab exec -s "$SESSION" -f "$GENERATED" --timeout 86400
+EXEC_CODE=$?
+set -e
+[ "$EXEC_CODE" = "0" ] || echo "== CLI вернул код $EXEC_CODE — это может быть таймаут ожидания кернела, а не ошибка задания"
 
 echo
 echo "== забираю архив =="
-colab download -s "$SESSION" "$REMOTE_ZIP" "$LOCAL_ZIP" || fail
-shasum -a 256 "$LOCAL_ZIP" || true
-echo "готово: $LOCAL_ZIP"
+# Машину при неудаче НЕ гасим: готовый архив может уже лежать на ней, а после stop он пропадёт.
+if colab download -s "$SESSION" "$REMOTE_ZIP" "$LOCAL_ZIP"; then
+    shasum -a 256 "$LOCAL_ZIP" || true
+    echo "готово: $LOCAL_ZIP"
+else
+    echo "архива на машине нет (или он ещё собирается). Машину не гашу, чтобы не потерять работу."
+    echo "дальше вручную:"
+    echo "  colab download -s $SESSION $REMOTE_ZIP ~/Downloads/$(basename "$LOCAL_ZIP")"
+    echo "  colab stop -s $SESSION"
+    exit 1
+fi
 
 if [ "${KEEP_SESSION:-0}" = "1" ]; then
     echo "машина оставлена (KEEP_SESSION=1): следующая книга пойдёт быстрее."
