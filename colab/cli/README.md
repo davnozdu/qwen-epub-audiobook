@@ -39,6 +39,7 @@
 | `DRIVE=1` | подключить Google Drive и положить `book.m4b` и read-along epub в `MyDrive/Audiobooks-colab/<имя книги>` (по умолчанию 1; `DRIVE=0` — не подключать) |
 | `DRIVE_DIR=...` | другая папка внутри `MyDrive` (по умолчанию `Audiobooks-colab`) |
 | `DRIVE_WAIT=120` | сколько секунд ждать подтверждения Drive, потом продолжить без него |
+| `AUTO_OPEN=0` | не открывать браузер со ссылкой авторизации Drive (по умолчанию открываем) |
 | `SHRINK_HOURS=7` | книги длиннее этого режутся на части (0 — не резать) |
 | `SHRINK_DIR=...` | папка на Drive для остальных частей (по умолчанию `Audiobooks-shrink`) |
 | `CAFFEINATE=0` | macOS: не мешать маку засыпать (по умолчанию обёртка держит его бодрым) |
@@ -137,6 +138,29 @@
     colab exec -s book -f qwen_tts_book.py      # задание само скопирует m4b и epub
 
 `DRIVE=0` (или `--no-drive` в задании) отключает Drive совсем.
+
+### Ссылка авторизации: браузер и кликабельность
+
+Чтобы ссылку не перекопировать руками, обёртка сама ловит её в выводе `colab drivemount`:
+
+     == подключаю Google Drive ==
+        если Google попросит подтверждение, открою ссылку в браузере сам — разрешите доступ
+        и нажмите Enter в этом окне; не дождались — задание поедет без Drive, архив заберём локально
+     [colab] REQUIRED: Google Drive Authorization needed.
+     Please visit:
+     https://accounts.google.com/o/oauth2/auth?client_id=…
+     → открываю браузер: https://accounts.google.com/o/oauth2/auth?client_id=…   ← ссылка кликабельна
+     Press Enter after you have granted access...   ← это приглашение видно сразу, без перевода строки
+
+- **браузер открывается сам** (`open` на macOS, `xdg-open` на Linux, `start` на Windows) — отключается
+  `AUTO_OPEN=0` или `--no-open`;
+- **ссылка кликабельна** там, где это умеет терминал: iTerm2, WezTerm, VS Code, Warp, Ghostty, kitty —
+  печатается как настоящая гиперссылка (OSC 8), достаточно щёлкнуть;
+- в Apple Terminal гиперссылок нет, поэтому ссылка печатается отдельной строкой — открывайте
+  щелчком с ⌘ (Cmd+клик), либо просто дайте обёртке открыть её самой;
+- открыть в браузере сам блокнот сессии можно и штатной командой CLI:
+
+      colab url -s book --open-browser
 
 ## Файлы
 

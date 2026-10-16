@@ -299,6 +299,13 @@ def main() -> int:
     check("def fetch_plan(" in wrapper and "def fetch_parts(" in wrapper,
           "обёртка забирает план нарезки и сами части локально")
     check('"--max-hours"' in wrapper, "обёртка передаёт заданию порог нарезки")
+    check("def stream_step(" in wrapper and "def clickable(" in wrapper and "def open_browser(" in wrapper,
+          "обёртка печатает ссылку авторизации кликабельной и открывает браузер")
+    check('"--no-open"' in wrapper and "supports_hyperlinks" in wrapper,
+          "открытие браузера отключается, гиперссылки — только там, где терминал их понимает")
+    job_text_again = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
+    check("reset" in job_text_again and '"--hard"' in job_text_again,
+          "задание берёт конвейер из GitHub жёстко (правки под Linux делают дерево грязным)")
 
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/**/*.ipynb")):

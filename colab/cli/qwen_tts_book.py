@@ -113,8 +113,8 @@ def find_book(name):
 def ensure_runner(repo_url, repo_dir):
     """Возвращает путь к colab_run_all.py: рядом с этим файлом или в свежем клоне.
 
-    Когда файл исполняет Colab CLI, `__file__` в ядре не определён — это не ошибка, просто
-    значит, что рядом с нами репозитория нет и его надо клонировать.
+    Когда файл исполняет Colab CLI, `__file__` в интерпретаторе не определён — это не ошибка,
+    просто значит, что рядом с нами репозитория нет и его надо получить.
     """
     here = globals().get("__file__")
     if here:
@@ -128,7 +128,14 @@ def ensure_runner(repo_url, repo_dir):
     banner(f"Репозиторий: {repo_url} → {repo_dir}")
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
     if (repo_dir / ".git").is_dir():
-        subprocess.run(["git", "-C", str(repo_dir), "pull", "--ff-only", "-q"], check=False)
+        # Дерево на машине правится под Linux (ffmpeg, mlx[cuda]), поэтому git pull упирается
+        # в локальные изменения и клон молча остаётся старым. Берём версию из GitHub жёстко:
+        # правки всё равно накладываются заново на каждом прогоне.
+        subprocess.run(["git", "-C", str(repo_dir), "fetch", "-q", "origin"], check=False)
+        subprocess.run(["git", "-C", str(repo_dir), "reset", "--hard", "-q", "FETCH_HEAD"], check=False)
+        head = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        print(f"  версия конвейера: {head or 'неизвестно'} (из GitHub)")
     else:
         shutil.rmtree(repo_dir, ignore_errors=True)
         subprocess.run(["git", "clone", "-q", repo_url, str(repo_dir)], check=True)
@@ -160,11 +167,24 @@ def shrink_step(runner, book, args):
     if args.no_drive or not DRIVE_ROOT.is_dir():
         command.append("--no-drive")          # Drive не подключён — части останутся только локально
     print("   " + " ".join(command), flush=True)
-    done = subprocess.run(command, cwd=str(repo), text=True, env=dict(os.environ, PYTHONPATH=str(repo)))
+    # Вывод печатаем через ядро (как stage-скрипты в colab_run_all.py): иначе он уходит в консоль
+    # машины и в терминале не появляется — тогда причина сбоя нарезки остаётся невидимой.
+    process = subprocess.Popen(command, cwd=str(repo), text=True, bufsize=1,
+                               env=dict(os.environ, PYTHONPATH=str(repo)),
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    tail = []
+    for line in process.stdout:
+        print(line.rstrip(), flush=True)
+        tail.append(line)
+        del tail[:-40]
+    process.wait()
+    code = process.returncode
 
     plan_path = parts_dir / "plan.json"
-    if done.returncode != 0 or not plan_path.is_file():
-        print("нарезка не удалась — продолжаю с книгой целиком.")
+    if code != 0 or not plan_path.is_file():
+        print(f"нарезка не удалась (код {code}) — продолжаю с книгой целиком.")
+        for line in tail[-14:]:
+            print("   ", line.rstrip())
         print("  учтите: если книга длиннее сессии Colab, синтез может не дожить до конца.")
         return book
     plan = json.loads(plan_path.read_text(encoding="utf-8"))

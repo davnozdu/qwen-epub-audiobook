@@ -139,6 +139,91 @@ def _reap_children() -> None:
 atexit.register(_reap_children)
 
 
+def supports_hyperlinks() -> bool:
+    """Умеет ли терминал ссылки OSC 8 (в Apple Terminal их нет — там Cmd+клик по обычной ссылке)."""
+    program = os.environ.get("TERM_PROGRAM", "")
+    term = os.environ.get("TERM", "")
+    if program in ("iTerm.app", "WezTerm", "vscode", "Hyper", "WarpTerminal", "ghostty", "kitty"):
+        return True
+    return any(name in term for name in ("kitty", "wezterm", "ghostty", "alacritty"))
+
+
+def clickable(url: str) -> str:
+    """Ссылка, по которой можно щёлкнуть, — там, где терминал это понимает."""
+    if supports_hyperlinks():
+        return f"\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\"
+    return url
+
+
+def open_browser(url: str) -> None:
+    """Открываем ссылку в браузере пользователя (OPEN_CMD заменяет открывалку — удобно для тестов)."""
+    override = os.environ.get("OPEN_CMD")
+    try:
+        if override:
+            subprocess.run([override, url], env=dict(os.environ))
+        elif IS_WINDOWS:
+            subprocess.run(["cmd", "/c", "start", "", url], env=dict(os.environ))
+        elif sys.platform == "darwin":
+            subprocess.run(["open", url], env=dict(os.environ))
+        else:
+            subprocess.run(["xdg-open", url], env=dict(os.environ))
+    except OSError as exc:
+        print(f"  (браузер открыть не вышло: {exc})", flush=True)
+
+
+def stream_step(cmd, timeout: float, open_links: bool = True):
+    """Запуск шага с живым выводом, ссылками и потолком по времени.
+
+    Вывод печатаем сразу, кусками (не по строкам): CLI пишет приглашение «Press Enter…» без
+    перевода строки, и построчное чтение его съедало. Заодно, увидев ссылку авторизации,
+    открываем браузер и печатаем её кликабельной.
+    """
+    import select
+
+    process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ),
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    LIVE_CHILDREN.append(process)
+    window, opened, state = "", set(), "ok"
+    deadline = time.monotonic() + max(1.0, timeout)
+    try:
+        while True:
+            if process.poll() is not None:
+                ready, _, _ = select.select([process.stdout], [], [], 0.2)
+                if not ready:
+                    break
+            left = deadline - time.monotonic()
+            if left <= 0:
+                state = "timeout"
+                break
+            ready, _, _ = select.select([process.stdout], [], [], min(1.0, left))
+            if not ready:
+                continue
+            chunk = os.read(process.stdout.fileno(), 4096).decode("utf-8", "replace")
+            if not chunk:
+                break
+            sys.stdout.write(chunk)
+            sys.stdout.flush()
+            window = (window + chunk)[-600:]
+            if open_links:
+                for url in re.findall(r"https://[^\s\x1b]+", window):
+                    if url not in opened:
+                        opened.add(url)
+                        print(f"\n   → открываю браузер: {clickable(url)}", flush=True)
+                        open_browser(url)
+        if state == "timeout":
+            kill_tree(process)
+        else:
+            process.wait()
+            state = "ok" if process.returncode == 0 else "failed"
+    except KeyboardInterrupt:
+        kill_tree(process)
+        raise
+    finally:
+        if process in LIVE_CHILDREN:
+            LIVE_CHILDREN.remove(process)
+    return state
+
+
 def run_with_timeout(cmd, timeout: float) -> str:
     """Запуск с потолком по времени. Возвращает: 'ok', 'failed' или 'timeout'.
 
@@ -213,17 +298,18 @@ def drive_is_mounted(colab: str, session: str) -> bool:
     return "DRIVE_OK True" in (done.stdout or "")
 
 
-def mount_drive(colab: str, session: str, wait_seconds: int) -> bool:
+def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = True) -> bool:
     """Подключает Drive. Возвращает True только если монтирование действительно есть.
 
     wait_seconds — это потолок ожидания, а не обязательная пауза: как только пользователь нажал
     Enter после авторизации, CLI дорабатывает монтирование и обёртка идёт дальше сразу.
     """
-    print("\n== подключаю Google Drive (если появится ссылка — разрешить доступ и нажать Enter) ==")
-    print(f"   ждём подтверждения до {wait_seconds} с: как только нажмёте Enter — едем дальше;")
-    print("   не дождались — задание поедет без Drive, архив заберём локально")
+    print("\n== подключаю Google Drive ==")
+    print("   если Google попросит подтверждение, открою ссылку в браузере сам — разрешите доступ")
+    print("   и нажмите Enter в этом окне; не дождались — задание поедет без Drive, архив заберём локально")
     print("   если CLI напишет «Press Enter after you have granted access» — вернитесь сюда и нажмите Enter")
-    state = run_with_timeout([colab, "drivemount", "-s", session], timeout=wait_seconds)
+    state = stream_step([colab, "drivemount", "-s", session], timeout=wait_seconds,
+                        open_links=open_links)
     if state == "timeout":
         print(f"  за {wait_seconds} с подтверждения не было — снимаю попытку, Drive пропускаем.")
         print("  едем без Drive: архив всё равно заберём в загрузки.")
@@ -364,6 +450,9 @@ def main() -> int:
                         help="папка на Drive для остальных частей")
     parser.add_argument("--no-shrink", action="store_true", default=os.environ.get("SHRINK", "1") == "0",
                         help="не резать книгу на части")
+    parser.add_argument("--no-open", action="store_true",
+                        default=os.environ.get("AUTO_OPEN", "1") == "0",
+                        help="не открывать браузер со ссылкой авторизации Drive")
     parser.add_argument("--no-caffeinate", action="store_true",
                         default=os.environ.get("CAFFEINATE", "1") == "0",
                         help="macOS: не мешать маку засыпать (по умолчанию мешаем)")
@@ -413,7 +502,7 @@ def main() -> int:
 
     drive_ok = False
     if not args.no_drive:
-        drive_ok = mount_drive(colab, args.session, args.drive_wait)
+        drive_ok = mount_drive(colab, args.session, args.drive_wait, open_links=not args.no_open)
         if drive_ok:
             print(f"  Drive подключён: book.m4b и read-along epub поедут в MyDrive/{args.drive_dir}/<имя книги>")
 
