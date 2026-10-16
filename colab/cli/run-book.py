@@ -149,10 +149,16 @@ def supports_hyperlinks() -> bool:
 
 
 def clickable(url: str) -> str:
-    """Ссылка, по которой можно щёлкнуть, — там, где терминал это понимает."""
+    """Ссылка: подсвечена в любом терминале, а где есть гиперссылки — ещё и кликабельна.
+
+    В логах (вывод не в терминал) не раскрашиваем: подсветка нужна человеку, а не автоматизации.
+    """
+    if not sys.stdout.isatty():
+        return url
+    text = f"\x1b[4;36m{url}\x1b[0m"          # подчёркнутый голубой: видно и в Apple Terminal
     if supports_hyperlinks():
-        return f"\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\"
-    return url
+        return f"\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\"
+    return text
 
 
 def open_browser(url: str) -> None:
@@ -204,11 +210,12 @@ def stream_step(cmd, timeout: float, open_links: bool = True):
             sys.stdout.write(chunk)
             sys.stdout.flush()
             window = (window + chunk)[-600:]
-            if open_links:
-                for url in re.findall(r"https://[^\s\x1b]+", window):
-                    if url not in opened:
-                        opened.add(url)
-                        print(f"\n   → открываю браузер: {clickable(url)}", flush=True)
+            for url in re.findall(r"https://[^\s\x1b]+", window):
+                if url not in opened:
+                    opened.add(url)
+                    print(f"\n   ссылка для подтверждения (⌘-клик в Apple Terminal, обычный клик в iTerm2):"
+                          f"\n   {clickable(url)}\n", flush=True)
+                    if open_links:
                         open_browser(url)
         if state == "timeout":
             kill_tree(process)
@@ -305,8 +312,9 @@ def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = 
     Enter после авторизации, CLI дорабатывает монтирование и обёртка идёт дальше сразу.
     """
     print("\n== подключаю Google Drive ==")
-    print("   если Google попросит подтверждение, открою ссылку в браузере сам — разрешите доступ")
-    print("   и нажмите Enter в этом окне; не дождались — задание поедет без Drive, архив заберём локально")
+    print("   если Google попросит подтверждение, покажу ссылку подсвеченной — откройте её и разрешите")
+    print(f"   доступ, затем нажмите Enter в этом окне; не дождались за {wait_seconds} с — задание")
+    print("   поедет без Drive, архив заберём локально")
     print("   если CLI напишет «Press Enter after you have granted access» — вернитесь сюда и нажмите Enter")
     state = stream_step([colab, "drivemount", "-s", session], timeout=wait_seconds,
                         open_links=open_links)
@@ -442,17 +450,18 @@ def main() -> int:
                         help="не подключать Google Drive")
     parser.add_argument("--drive-dir", default=os.environ.get("DRIVE_DIR", "Audiobooks-colab"),
                         help="папка внутри MyDrive")
-    parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "120")),
-                        help="сколько секунд ждать подтверждения Drive")
+    parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "60")),
+                        help="сколько секунд ждать подтверждения Drive (по умолчанию 60)")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
                         help="если книга длиннее — задание разрежет её на части (0 — не резать)")
     parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
                         help="папка на Drive для остальных частей")
     parser.add_argument("--no-shrink", action="store_true", default=os.environ.get("SHRINK", "1") == "0",
                         help="не резать книгу на части")
-    parser.add_argument("--no-open", action="store_true",
-                        default=os.environ.get("AUTO_OPEN", "1") == "0",
-                        help="не открывать браузер со ссылкой авторизации Drive")
+    parser.add_argument("--open", action="store_true", default=os.environ.get("AUTO_OPEN", "0") == "1",
+                        help="открывать браузер со ссылкой авторизации Drive "
+                             "(по умолчанию выключено: ссылка просто подсвечивается)")
+    parser.add_argument("--no-open", action="store_true", help="оставлено для совместимости: браузер и так не открываем")
     parser.add_argument("--no-caffeinate", action="store_true",
                         default=os.environ.get("CAFFEINATE", "1") == "0",
                         help="macOS: не мешать маку засыпать (по умолчанию мешаем)")
@@ -502,7 +511,8 @@ def main() -> int:
 
     drive_ok = False
     if not args.no_drive:
-        drive_ok = mount_drive(colab, args.session, args.drive_wait, open_links=not args.no_open)
+        drive_ok = mount_drive(colab, args.session, args.drive_wait,
+                               open_links=args.open and not args.no_open)
         if drive_ok:
             print(f"  Drive подключён: book.m4b и read-along epub поедут в MyDrive/{args.drive_dir}/<имя книги>")
 
