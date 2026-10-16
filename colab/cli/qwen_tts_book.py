@@ -145,6 +145,26 @@ def ensure_runner(repo_url, repo_dir):
     return runner
 
 
+def ensure_libs_for_split(runner, book, args) -> None:
+    """Нарезке нужны те же библиотеки, что и конвейеру (EbookLib, lxml, bs4).
+
+    Раньше она падала с «No module named 'ebooklib'»: зависимости ставит первая стадия конвейера,
+    а нарезка идёт до неё. Прогоняем стадию установки заранее — она потом пропустится.
+    """
+    if args.local or getattr(args, "skip_install", False):
+        return
+    probe = subprocess.run([sys.executable, "-c", "import ebooklib, lxml, bs4"],
+                           capture_output=True, text=True, env=dict(os.environ))
+    if probe.returncode == 0:
+        return
+    print("   библиотек для нарезки ещё нет — сначала стадия установки (она же нужна конвейеру)",
+          flush=True)
+    subprocess.run([sys.executable, str(runner), str(book), "--upto", "deps",
+                    "--out", str(pathlib.Path("/content/out") / book.stem if pathlib.Path("/content").is_dir()
+                                  else pathlib.Path.cwd() / "out" / book.stem)],
+                   env=dict(os.environ, PYTHONPATH=str(runner.parent.parent)), check=False)
+
+
 def shrink_step(runner, book, args):
     """Толстую книгу режем на части: в обработку идёт первая, остальные уезжают на Drive.
 
@@ -162,6 +182,7 @@ def shrink_step(runner, book, args):
     base = pathlib.Path("/content/out") if pathlib.Path("/content").is_dir() else pathlib.Path.cwd() / "out"
     parts_dir = base / f"{book.stem}-parts"
     banner("Нарезка: влезает ли книга в разумное время")
+    ensure_libs_for_split(runner, book, args)
     command = [sys.executable, str(splitter), str(book), "--out", str(parts_dir),
                "--max-hours", str(args.max_hours), "--drive-dir", str(args.shrink_dir)]
     if args.no_drive or not DRIVE_ROOT.is_dir():

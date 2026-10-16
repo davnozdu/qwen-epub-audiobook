@@ -182,7 +182,7 @@ def open_browser(url: str) -> None:
         print(f"  (браузер открыть не вышло: {exc})", flush=True)
 
 
-def stream_step(cmd, timeout: float, open_links: bool = False):
+def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_links: bool = False):
     """Запуск шага с живым выводом и потолком по времени.
 
     Вывод печатаем сразу, кусками: CLI пишет приглашение «Press Enter…» без перевода строки,
@@ -204,7 +204,7 @@ def stream_step(cmd, timeout: float, open_links: bool = False):
 
     def emit(chunk, final=False):
         """Печатаем поток; ссылки подсвечиваем на месте — токен может прийти по частям."""
-        nonlocal tail
+        nonlocal tail, deadline
         if not collect:
             sys.stdout.write(chunk)
             sys.stdout.flush()
@@ -220,20 +220,26 @@ def stream_step(cmd, timeout: float, open_links: bool = False):
                 sys.stdout.write(clickable(piece))     # подсвечиваем только ссылку авторизации Drive
                 if piece not in links:
                     links.append(piece)
+                    # подтверждение ждём с момента, когда ссылка показана, а не с запуска
+                    deadline = time.monotonic() + max(1.0, timeout)
             else:
                 sys.stdout.write(piece)                # прочие ссылки не трогаем
         sys.stdout.flush()
 
-    deadline = time.monotonic() + max(1.0, timeout)
+    started = time.monotonic()
+    deadline = started + max(1.0, timeout)          # ожидание подтверждения (ссылки и Enter)
+    limit = started + max(1.0, silent_timeout or timeout)
     try:
         while True:
             if process.poll() is not None:
                 ready, _, _ = select.select([process.stdout], [], [], 0.2)
                 if not ready:
                     break
-            left = deadline - time.monotonic()
+            now = time.monotonic()
+            # до появления ссылки подтверждать нечего: это просто медленное монтирование
+            left = max(deadline, limit) - now if not links else deadline - now
             if left <= 0:
-                state = "timeout"
+                state = "timeout" if links else "silent-timeout"
                 break
             ready, _, _ = select.select([process.stdout], [], [], min(1.0, left))
             if not ready:
@@ -340,32 +346,38 @@ def drive_is_mounted(colab: str, session: str) -> bool:
 def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = True) -> bool:
     """Подключает Drive. Возвращает True только если монтирование действительно есть.
 
-    wait_seconds — это потолок ожидания, а не обязательная пауза: как только пользователь нажал
-    Enter после авторизации, CLI дорабатывает монтирование и обёртка идёт дальше сразу.
+    wait_seconds — сколько ждём ПОДТВЕРЖДЕНИЯ (появления ссылки и нажатия Enter). Само монтирование
+    может идти дольше: если ссылки не было, CLI просто монтирует уже разрешённый Drive, и обрывать
+    его на этом нельзя. Поэтому молчаливое ожидание ограничено отдельным, более щедрым потолком;
+    а после любого исхода спрашиваем машину, смонтирован ли Drive на самом деле.
     """
+    silent_cap = float(os.environ.get("DRIVE_MOUNT_WAIT", "180"))
     print("\n== подключаю Google Drive ==")
     print("   если Google попросит подтверждение, покажу ссылку подсвеченной — откройте её и разрешите")
-    print(f"   доступ, затем нажмите Enter в этом окне; не дождались за {wait_seconds} с — задание")
-    print("   поедет без Drive, архив заберём локально")
-    print("   если CLI напишет «Press Enter after you have granted access» — вернитесь сюда и нажмите Enter")
+    print(f"   доступ, затем нажмите Enter в этом окне (ждём {wait_seconds} с после ссылки);")
+    print("   не дождались — задание поедет без Drive, архив заберём локально")
     state = stream_step([colab, "drivemount", "-s", session], timeout=wait_seconds,
-                        open_links=open_links)
+                        silent_timeout=max(float(wait_seconds), silent_cap), open_links=open_links)
     if state == "timeout":
-        print(f"  за {wait_seconds} с подтверждения не было — снимаю попытку, Drive пропускаем.")
-        print("  едем без Drive: архив всё равно заберём в загрузки.")
-        return False
-    if state == "failed":
-        print("  Drive не подключился (или доступ не подтверждён).")
-        print("  едем без Drive: архив всё равно заберём в загрузки.")
-        return False
+        print(f"  подтверждения не было за {wait_seconds} с после ссылки — снимаю попытку.")
+    elif state == "silent-timeout":
+        print(f"  монтирование не ответило за {silent_cap:.0f} с — снимаю попытку.")
+    elif state == "failed":
+        print("  CLI сообщил об ошибке монтирования.")
 
-    # Только что смонтированный Drive виден не мгновенно, поэтому спрашиваем машину несколько раз.
+    # Спрашиваем машину: CLI мог быть медленным, а Drive при этом уже подключён.
     for attempt in range(6):
         if drive_is_mounted(colab, session):
+            if state != "ok":
+                print("  но монтирование на машине есть — работаем с Drive.")
             return True
-        time.sleep(2)
-    print("  монтирования не видно (или доступ не подтверждён).")
+        if state == "ok":
+            time.sleep(2)          # CLI завершился, но файловая система могла появиться не сразу
+    if state == "ok":
+        print("  монтирования на машине не видно (доступ не подтверждён?).")
     print("  едем без Drive: архив всё равно заберём в загрузки.")
+    print("  подключить позже можно вручную: colab drivemount -s " + session
+          + " (готовый архив уедет на Drive при завершении задания)")
     return False
 
 
