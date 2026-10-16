@@ -245,7 +245,7 @@ def main() -> int:
         for line in text.splitlines():
             if "subprocess.Popen(" in line or "subprocess.run([" in line:
                 window = text[text.index(line):text.index(line) + 400]
-                if any(k in window for k in ("nvidia-smi", "ffmpeg", "py_compile", "git ")):
+                if any(k in window for k in ("nvidia-smi", "ffmpeg", "py_compile", '"git"', "git ")):
                     continue
                 check("env=" in window, f"{rel}: PYTHONPATH у дочернего процесса — {line.strip()[:50]}")
 
