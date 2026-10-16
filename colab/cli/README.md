@@ -141,8 +141,9 @@
 
 ### Ссылка авторизации: подсветка, а не автозапуск
 
-Обёртка ловит в выводе `colab drivemount` **именно ссылку авторизации Google Drive**
-(`accounts.google.com/o/oauth2/…`) и подсвечивает её — в потоке и отдельной строкой-подсказкой:
+Обёртка находит в выводе `colab drivemount` **именно ссылку авторизации Google Drive**
+(`accounts.google.com/o/oauth2/…`) и подсвечивает её прямо в строке, которую напечатал CLI
+(никаких вторых копий):
 
      == подключаю Google Drive ==
         если Google попросит подтверждение, покажу ссылку подсвеченной — откройте её и разрешите
@@ -153,8 +154,6 @@
 
      https://accounts.google.com/o/oauth2/v2/auth?…        ← эта строка подсвечена
      Press Enter after you have granted access...          ← приглашение видно сразу
-
-       ссылка авторизации Drive (⌘-клик): https://accounts.google.com/o/oauth2/v2/auth?…   ← и ещё раз
 
 - **подсвечивается только ссылка авторизации Drive** — прочие ссылки в выводе (например
   «Connecting to https://colab.research.google.com…») остаются как есть;

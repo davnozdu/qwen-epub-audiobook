@@ -243,10 +243,7 @@ def stream_step(cmd, timeout: float, open_links: bool = False):
                 break
             emit(chunk)
         emit("", final=True)                       # хвост без пробела всё равно печатаем
-        if decorate and links:
-            hint = "обычный клик" if supports_hyperlinks() else "⌘-клик"
-            print(f"\n   ссылка авторизации Drive ({hint}): " + clickable(links[0]), flush=True)
-        if open_links:
+        if open_links:                           # ссылку показываем один раз — в строке самого CLI
             for url in links or []:
                 if url not in opened:
                     opened.add(url)
