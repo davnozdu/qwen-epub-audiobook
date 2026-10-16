@@ -99,14 +99,28 @@ def kill_command(pid: int, nt: bool | None = None) -> list[str]:
     return ["taskkill", "/F", "/T", "/PID", str(pid)] if windows else ["kill", str(pid)]
 
 
+def child_pids(pid: int) -> list[int]:
+    """Прямые потомки процесса — их тоже надо погасить (ps есть и на macOS, и на Linux)."""
+    done = subprocess.run(["ps", "-o", "pid=", "--ppid", str(pid)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=dict(os.environ))
+    return [int(value) for value in (done.stdout or "").split() if value.isdigit()]
+
+
 def kill_tree(process) -> None:
+    """Гасим процесс и его детей. Свою группу не трогаем: мы в ней сами и терминал у нас общий."""
     try:
         if IS_WINDOWS:
             subprocess.run(kill_command(process.pid, nt=True), capture_output=True, env=dict(os.environ))
         else:
+            for child in child_pids(process.pid):
+                try:
+                    os.kill(child, 9)
+                except OSError:
+                    pass
+            process.terminate()
             try:
-                os.killpg(os.getpgid(process.pid), 9)      # глушим всю группу: у CLI есть дети
-            except (ProcessLookupError, PermissionError):
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
                 process.kill()
         process.wait(timeout=30)
     except Exception:
@@ -128,14 +142,11 @@ atexit.register(_reap_children)
 def run_with_timeout(cmd, timeout: float) -> str:
     """Запуск с потолком по времени. Возвращает: 'ok', 'failed' или 'timeout'.
 
-    Вывод НЕ перехватываем, а отдаём прямо в терминал: CLI печатает часть подсказок без перевода
-    строки («Press Enter after you have granted access...»), и при перехвате построчным
-    чтением они не доходили бы до человека — он видел бы зависание без приглашения.
+    Вывод НЕ перехватываем и НЕ уводим процесс в новую сессию: CLI печатает приглашение без
+    перевода строки и читает ответ «Press Enter...» прямо из /dev/tty. В новой сессии
+    управляющего терминала нет, /dev/tty не открывается — и ожидание виснет навсегда.
     """
-    kwargs = {}
-    if not IS_WINDOWS:
-        kwargs["start_new_session"] = True      # тогда Ctrl-C не бьёт по группе и мы гасим её сами
-    process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ), **kwargs)
+    process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ))
     LIVE_CHILDREN.append(process)
     try:
         process.wait(timeout=max(1.0, timeout))
