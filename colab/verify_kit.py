@@ -284,8 +284,12 @@ def main() -> int:
     check('MLX_ENABLE_CACHE_THRASHING_CHECK' in all_stages and 're.search' in all_stages,
           "colab_run_all.py: разбирает имя переменной из сообщения MLX и имеет последнюю ступень")
     splitter = (clone / "shrink_book.py").read_text(encoding="utf-8")
+    check("build_part_from_source" in splitter and "read_original" in splitter,
+          "shrink_book.py: части собираются из исходного EPUB (метаданные, обложка, разметка)")
+    check("cover-image" in splitter and "kept_names" in splitter,
+          "shrink_book.py: обложка помечается, оглавление фильтруется по главам части")
     check("build_text_epub" in splitter,
-          "shrink_book.py: части книги собираются тем же сборщиком текста, что и конвейер")
+          "shrink_book.py: есть откат на нормализованный текст конвейера")
     check("Audiobooks-shrink" in splitter and '"plan.json"' in splitter.replace("'", '"'),
           "shrink_book.py: пишет план нарезки и папку для частей на Drive")
     job_text = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
