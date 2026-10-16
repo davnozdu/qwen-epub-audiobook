@@ -113,34 +113,42 @@ def kill_tree(process) -> None:
         pass
 
 
+LIVE_CHILDREN = []            # дети, которых могли не дождаться: при выходе гасим
+
+
+def _reap_children() -> None:
+    for child in list(LIVE_CHILDREN):
+        if child.poll() is None:
+            kill_tree(child)
+
+
+atexit.register(_reap_children)
+
+
 def run_with_timeout(cmd, timeout: float) -> str:
-    """Запуск с живым выводом и потолком по времени. Возвращает: 'ok', 'failed' или 'timeout'."""
-    kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "text": True,
-              "encoding": "utf-8", "errors": "replace", "bufsize": 1}
+    """Запуск с потолком по времени. Возвращает: 'ok', 'failed' или 'timeout'.
+
+    Вывод НЕ перехватываем, а отдаём прямо в терминал: CLI печатает часть подсказок без перевода
+    строки («Press Enter after you have granted access...»), и при перехвате построчным
+    чтением они не доходили бы до человека — он видел бы зависание без приглашения.
+    """
+    kwargs = {}
     if not IS_WINDOWS:
-        kwargs["start_new_session"] = True
+        kwargs["start_new_session"] = True      # тогда Ctrl-C не бьёт по группе и мы гасим её сами
     process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ), **kwargs)
-    lines = []
-    deadline = time.monotonic() + timeout
-    import threading
-
-    def reader():
-        if process.stdout is None:
-            return
-        for line in process.stdout:
-            print(line.rstrip(), flush=True)
-            lines.append(line)
-
-    thread = threading.Thread(target=reader, daemon=True)
-    thread.start()
+    LIVE_CHILDREN.append(process)
     try:
         process.wait(timeout=max(1.0, timeout))
-        thread.join(timeout=5)
         return "ok" if process.returncode == 0 else "failed"
     except subprocess.TimeoutExpired:
         kill_tree(process)
-        thread.join(timeout=5)
         return "timeout"
+    except KeyboardInterrupt:
+        kill_tree(process)                      # иначе ожидание монтирования останется сиротой
+        raise
+    finally:
+        if process in LIVE_CHILDREN:
+            LIVE_CHILDREN.remove(process)
 
 
 # ────────────────────────────── сессии ──────────────────────────────
@@ -189,6 +197,7 @@ def mount_drive(colab: str, session: str, wait_seconds: int) -> bool:
     """Подключает Drive с ожиданием wait_seconds. Возвращает True только если монтирование есть."""
     print("\n== подключаю Google Drive (если появится ссылка — разрешить доступ и нажать Enter) ==")
     print(f"   ждём {wait_seconds} с: не успели — задание поедет без Drive, архив заберём локально")
+    print("   если CLI напишет «Press Enter after you have granted access» — вернитесь сюда и нажмите Enter")
     state = run_with_timeout([colab, "drivemount", "-s", session], timeout=wait_seconds)
     if state == "timeout":
         print(f"  за {wait_seconds} с подтверждения не было — снимаю попытку, Drive пропускаем.")
