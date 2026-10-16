@@ -418,10 +418,16 @@ def stage_prepare(args, project):
         print("нарезка уже есть:", source / "manifest.json")
 
     prepared = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    # Когда озвучивается вся книга, --seconds не задан и expected_seconds пуст: считаем оценку сами
+    # (той же формулой, что и конвейер: 14 знаков в секунду плюс объявленные паузы).
+    seconds = prepared["excerpt"].get("expected_seconds")
+    if not seconds:
+        seconds = sum(len(row["text"]) / 14 + row["pause_after_ms"] / 1000
+                      for row in prepared["segments"])
     print("сегментов на озвучку:", prepared["summary"]["segments"],
           "| абзацев:", prepared["summary"]["paragraphs"],
           "| голосов:", prepared["summary"]["voices"],
-          "| ожидаемое время звука:", round(prepared["excerpt"].get("expected_seconds") or 0, 1), "с")
+          f"| ожидаемое время звука: {seconds / 60:.0f} мин ({seconds / 3600:.1f} ч)")
     assert (source / "book-text.epub").exists(), "не собран book-text.epub"
     print("✓ нарезка готова")
     return source
