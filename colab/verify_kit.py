@@ -321,6 +321,9 @@ def main() -> int:
     job_text = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
     check("user.drive.id" in job_text and "drive.google.com/drive/folders" in job_text,
           "job: ссылки на папку и файлы Google Drive после сборки")
+    check("START_RETRY_DELAYS" in wrapper and "short_reason" in wrapper
+          and "TooManyAssignments" in wrapper,
+          "обёртка: машину просит повторно, распознаёт лимит тарифа и объясняет причину")
     check("Enter нажат автоматически" in wrapper and "DRIVE_AUTO_ENTER" in wrapper
           and "drive_mount_step" in wrapper,
           "обёртка: через DRIVE_WAIT сама нажимает Enter и проверяет доступ к Drive")

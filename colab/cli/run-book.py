@@ -501,16 +501,48 @@ def probe_session(colab: str, session: str, timeout: float = 90) -> bool:
     return process.returncode == 0 and "жив" in output
 
 
+def short_reason(output: str) -> str:
+    """Короткая причина из вывода CLI: без рамок и трассировки."""
+    lines = [re.sub(r"[│╭╰─╮╯]+", " ", line).strip() for line in (output or "").splitlines()]
+    lines = [line for line in lines if line]
+    for line in reversed(lines):
+        if any(word in line for word in ("Error", "error", "refused", "Unavailable", "unavailable",
+                                         "limit", "Limit", "precondition")):
+            return line[:120]
+    return lines[-1][:120] if lines else "причина неясна"
+
+
 def start_session(colab: str, session: str, gpu: str) -> bool:
-    """Поднимает машину и убеждается, что кернел отвечает (сразу после старта связь бывает рваной)."""
-    if run([colab, "new", "-s", session, "--gpu", gpu]).returncode != 0:
-        return False
-    for attempt in range(3):
-        if probe_session(colab, session):
-            return True
-        if attempt < 2:
-            print(f"  машина поднялась, но кернел не отвечает — проверяю ещё раз ({attempt + 2}-я попытка)")
-            time.sleep(5)
+    """Поднимает машину и убеждается, что кернел отвечает.
+
+    Машина может не достаться по внешним причинам: Colab отвечает «Service Unavailable», когда
+    свободных T4 нет, или «too many assignments», когда у бесплатного тарифа закончились места.
+    Поэтому пробуем несколько раз с паузой, а не падаем после первой попытки.
+    """
+    attempts = int(os.environ.get("START_ATTEMPTS", "4"))
+    delays = [float(part) for part in os.environ.get("START_RETRY_DELAYS", "15,30,60").split(",")]
+    for attempt in range(1, attempts + 1):
+        done = run_quiet([colab, "new", "-s", session, "--gpu", gpu])
+        output = (done.stdout or "") + (done.stderr or "")
+        if done.returncode == 0:
+            if probe_session(colab, session):
+                return True
+            print("  машина поднялась, но кернел не отвечает — проверяю ещё раз")
+        else:
+            print(f"  машина не выдана: {short_reason(output)}")
+        if attempt == attempts:
+            break
+        delay = delays[min(attempt - 1, len(delays) - 1)]
+        if "TooManyAssignments" in output or "too many" in output.lower():
+            delay = max(delay, 120)                  # лимит бесплатного тарифа: ждём дольше
+            print("  похоже, у бесплатного тарифа заняты все машины — подожду подольше")
+        print(f"  повторяю попытку через {delay:.0f} с (это {attempt + 1}-я из {attempts})")
+        notify_telegram(f"⏳ Colab не выдал машину ({short_reason(output)}). "
+                        f"Повторю через {delay:.0f} с — попытка {attempt + 1} из {attempts}.")
+        time.sleep(delay)
+    notify_telegram(f"⚠️ Машину {gpu} получить не удалось после {attempts} попыток. "
+                    f"Обычно это значит, что свободных ускорителей нет: попробуйте позже "
+                    f"или другой ускоритель (--gpu A100 / L4).")
     return False
 
 
