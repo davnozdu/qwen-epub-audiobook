@@ -191,6 +191,9 @@ def open_browser(url: str) -> None:
         print(f"  (браузер открыть не вышло: {exc})", flush=True)
 
 
+LAST_OUTPUT = ""          # хвост последнего вывода: нужен, чтобы понять причину сбоя
+
+
 def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_links: bool = False):
     """Запуск шага с живым выводом и потолком по времени.
 
@@ -214,6 +217,8 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
     def emit(chunk, final=False):
         """Печатаем поток; ссылки подсвечиваем на месте — токен может прийти по частям."""
         nonlocal tail, deadline
+        global LAST_OUTPUT
+        LAST_OUTPUT = (LAST_OUTPUT + chunk)[-4000:]
         if not collect:
             sys.stdout.write(chunk)
             sys.stdout.flush()
@@ -353,7 +358,38 @@ def drive_is_mounted(colab: str, session: str) -> bool:
     return "DRIVE_OK True" in (done.stdout or "")
 
 
-def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = True) -> bool:
+def probe_session(colab: str, session: str, timeout: float = 90) -> bool:
+    """Жива ли машина: короткий запуск в кернеле. «Connection was lost» = кернел умер."""
+    global LAST_OUTPUT
+    probe = pathlib.Path(tempfile.gettempdir()) / "colab-probe.py"
+    probe.write_text('print("жив")\n', encoding="utf-8")
+    LAST_OUTPUT = ""
+    try:
+        process = subprocess.run([colab, "exec", "-s", session, "-f", str(probe), "--timeout", "60"],
+                                 capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    finally:
+        probe.unlink(missing_ok=True)
+    output = (process.stdout or "") + (process.stderr or "")
+    return process.returncode == 0 and "жив" in output
+
+
+def start_session(colab: str, session: str, gpu: str) -> bool:
+    """Поднимает машину и убеждается, что кернел отвечает (сразу после старта связь бывает рваной)."""
+    if run([colab, "new", "-s", session, "--gpu", gpu]).returncode != 0:
+        return False
+    for attempt in range(3):
+        if probe_session(colab, session):
+            return True
+        if attempt < 2:
+            print(f"  машина поднялась, но кернел не отвечает — проверяю ещё раз ({attempt + 2}-я попытка)")
+            time.sleep(5)
+    return False
+
+
+def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = True,
+                gpu: str = "T4", attempt: int = 0) -> bool:
     """Подключает Drive. Возвращает True только если монтирование действительно есть.
 
     wait_seconds — сколько ждём ПОДТВЕРЖДЕНИЯ (появления ссылки и нажатия Enter). Само монтирование
@@ -374,17 +410,36 @@ def mount_drive(colab: str, session: str, wait_seconds: int, open_links: bool = 
         print(f"  монтирование не ответило за {silent_cap:.0f} с — снимаю попытку.")
     elif state == "failed":
         print("  CLI сообщил об ошибке монтирования.")
+        if "Connection was lost" in LAST_OUTPUT and attempt < 2:
+            # Обычно это значит, что машина умерла: без неё и сборка не пойдёт — лечим сразу.
+            print("  связь с машиной потеряна — проверяю, отвечает ли она…")
+            notify_telegram("⚠️ Связь с машиной Colab потеряна на шаге подключения Google Drive — "
+                            "проверяю машину и продолжаю.")
+            if probe_session(colab, session):
+                print("  машина отвечает — повторяю монтирование.")
+            else:
+                print("  машина не отвечает — поднимаю заново.")
+                notify_telegram("🔁 Машина не отвечает, поднимаю новую сессию.")
+                if start_session(colab, session, gpu):
+                    print("  новая машина готова — повторяю монтирование.")
+                else:
+                    print("  поднять машину не удалось.")
+            return mount_drive(colab, session, wait_seconds, open_links=open_links, gpu=gpu,
+                               attempt=attempt + 1)
 
     # Спрашиваем машину: CLI мог быть медленным, а Drive при этом уже подключён.
     for attempt in range(6):
         if drive_is_mounted(colab, session):
             if state != "ok":
                 print("  но монтирование на машине есть — работаем с Drive.")
+            notify_telegram("✅ Google Drive подключён")
             return True
         if state == "ok":
             time.sleep(2)          # CLI завершился, но файловая система могла появиться не сразу
     if state == "ok":
         print("  монтирования на машине не видно (доступ не подтверждён?).")
+        notify_telegram("⚠️ Google Drive не подключился (подтверждение не дошло) — "
+                        "продолжаю сборку, архив заберём локально.")
     print("  едем без Drive: архив всё равно заберём в загрузки.")
     print("  подключить позже можно вручную: colab drivemount -s " + session
           + " (готовый архив уедет на Drive при завершении задания)")
@@ -588,12 +643,13 @@ def main() -> int:
 
     print(f"\n== поднимаю сессию {args.session} ({args.gpu}) ==")
     notify_telegram(f"🚀 Поднимаю машину Colab ({args.gpu}) для «{stem}»")
-    if run([colab, "new", "-s", args.session, "--gpu", args.gpu]).returncode != 0:
+    if not start_session(colab, args.session, args.gpu):
+        print("  машина не поднялась или кернел не отвечает.")
         return fail()
 
     drive_ok = False
     if not args.no_drive:
-        drive_ok = mount_drive(colab, args.session, args.drive_wait,
+        drive_ok = mount_drive(colab, args.session, args.drive_wait, gpu=args.gpu,
                                open_links=args.open and not args.no_open)
         if drive_ok:
             print(f"  Drive подключён: book.m4b и read-along epub поедут в MyDrive/{args.drive_dir}/<имя книги>")

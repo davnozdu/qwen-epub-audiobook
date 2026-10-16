@@ -38,6 +38,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -264,6 +265,33 @@ def run_pipeline(args, runner, book):
                          f"{process.returncode}\nпоследние строки:\n{''.join(tail)}")
 
 
+def drive_link(path) -> str:
+    """Ссылка на файл или папку в Google Drive.
+
+    На смонтированном диске drivefs держит идентификатор объекта в расширенном атрибуте
+    user.drive.id — по нему и собираем прямую ссылку. Если атрибута нет (старое ядро, другой
+    монтировщик), возвращаем поиск по имени: он всё равно открывает нужную папку.
+    """
+    path = pathlib.Path(path)
+    file_id = ""
+    try:                                    # на смонтированном Drive (Linux) атрибут читается напрямую
+        file_id = os.getxattr(str(path), "user.drive.id").decode("utf-8", "replace").strip()
+    except AttributeError:                  # macOS: нет os.getxattr — берём через команду xattr
+        try:
+            done = subprocess.run(["xattr", "-p", "user.drive.id", str(path)],
+                                  capture_output=True, text=True, timeout=10)
+            file_id = done.stdout.strip() if done.returncode == 0 else ""
+        except Exception:
+            file_id = ""
+    except Exception:
+        file_id = ""
+    if file_id:
+        if path.is_dir():
+            return f"https://drive.google.com/drive/folders/{file_id}"
+        return f"https://drive.google.com/file/d/{file_id}/view"
+    return "https://drive.google.com/drive/search?q=" + urllib.parse.quote(path.name)
+
+
 def pack(args, book):
     result = pathlib.Path(args.out) / "project" / "result"       # так его создаёт stage_package
     missing = [name for name in RESULT_FILES if not (result / name).is_file()]
@@ -284,6 +312,7 @@ def pack(args, book):
     print(f"размер     : {archive.stat().st_size / 1e6:.1f} МБ")
     print(f"sha256     : {digest}")
 
+    drive_links = None
     if args.no_drive:
         print("на Google Drive не копирую: --no-drive")
     elif not DRIVE_ROOT.is_dir():
@@ -300,16 +329,30 @@ def pack(args, book):
         except OSError as exc:
             print(f"Drive подключён, но создать {book_dir} не вышло: {exc}")
         else:
+            copied = []
             for source_name in RESULT_FILES:
                 target = book_dir / names[source_name]
                 try:
                     shutil.copyfile(result / source_name, target)
                     print(f"на Google Drive: {target} ({target.stat().st_size / 1e6:.1f} МБ)")
+                    copied.append((target.name, drive_link(target)))
                 except OSError as exc:
                     print(f"не скопировалось на Drive: {target} — {exc}")
+            if copied:
+                drive_links = (drive_link(book_dir), copied)
 
     print("\nскачать на свой диск:\n"
           f"  colab download -s <сессия> {archive} ~/Downloads/{archive.name}")
+
+    if drive_links:
+        folder_link, files = drive_links
+        print("\nна Google Drive:")
+        print(f"  папка: {folder_link}")
+        for name, link in files:
+            print(f"  {name}: {link}")
+        lines = "\n".join(f"• {name}: {link}" for name, link in files)
+        notify_telegram("📂 Книга на Google Drive\n"
+                        f"папка «{args.drive_dir}/{pathlib.Path(book).stem}»:\n{folder_link}\n{lines}")
     return archive
 
 

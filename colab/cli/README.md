@@ -204,6 +204,18 @@
 Если чат известен, задайте его явно (`TELEGRAM_CHAT_ID` / `--telegram-chat`) — тогда не нужен
 даже один Start.
 
+В конце сборки, если файлы уехали на Google Drive, придёт **папка и прямые ссылки на оба файла**:
+
+    📂 Книга на Google Drive
+    папка «Audiobooks-colab/vosstavshij_iz_ada»:
+    https://drive.google.com/drive/folders/1AbC…
+    • vosstavshij_iz_ada.m4b: https://drive.google.com/file/d/1M4b…/view
+    • vosstavshij_iz_ada-read-along.epub: https://drive.google.com/file/d/1Epub…/view
+
+Ссылки строятся по идентификаторам Drive, которые drivefs держит в атрибуте `user.drive.id`
+смонтированного файла. Если атрибута нет (старое ядро или другой монтировщик), вместо прямой
+ссылки придёт поиск по имени — он открывает ту же папку.
+
 Правила, которые соблюдены в коде:
 
 * ключ **никогда не хранится в репозитории** — только окружение или ключ запуска;

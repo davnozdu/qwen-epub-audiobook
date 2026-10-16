@@ -318,6 +318,11 @@ def main() -> int:
             if re.search(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}", text_file):
                 leak.append(str(path.relative_to(clone)))
     check(not leak, f"в репозитории нет зашитых ключей ботов: {leak}")
+    job_text = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
+    check("user.drive.id" in job_text and "drive.google.com/drive/folders" in job_text,
+          "job: ссылки на папку и файлы Google Drive после сборки")
+    check("Connection was lost" in wrapper and "probe_session" in wrapper,
+          "обёртка: потеря связи с машиной распознаётся и лечится перезапуском")
     check('"--env"' in wrapper and "TELEGRAM_BOT_TOKEN" in wrapper,
           "обёртка передаёт ключи уведомлений на машину через --env")
     check("def stream_step(" in wrapper and "def clickable(" in wrapper and "def open_browser(" in wrapper,
