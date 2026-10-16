@@ -55,24 +55,53 @@ LOCAL_ZIP="$HOME/Downloads/${STEM}.zip"
 echo "== прошлые сессии =="
 SESSION_LINES="$(colab sessions 2>/dev/null || true)"
 printf '%s\n' "$SESSION_LINES"
-# формат строки CLI: [имя] endpoint | Hardware: X | Shape: Y | Variant: Z; у чужих сессий имя «?»
+STATE="$HOME/.config/colab-cli/sessions.json"
+
+# Имена своих сессий: формат строки CLI — [имя] endpoint | Hardware: X | Shape: Y | Variant: Z
 printf '%s\n' "$SESSION_LINES" | python3 -c "
 import re, sys
 for line in sys.stdin:
     match = re.match(r'\[([^\]]*)\]\s+\S+\s+\|', line.strip())
-    if match:
+    if match and match.group(1) != '?':
         print(match.group(1))
 " | while read -r name; do
-    if [ "$name" = "?" ]; then
-        echo "  ВНИМАНИЕ: в списке есть сессия «?» — чужая для CLI (обычно это открытая вкладка Colab)."
-        echo "  Погасить её из терминала нельзя, квоту она держит: colab.research.google.com →"
-        echo "  Manage sessions → Terminate, либо закройте вкладку через Runtime → Disconnect."
-        continue
-    fi
     [ -n "$name" ] || continue
     echo "  останавливаю: $name"
     colab stop -s "$name" >/dev/null 2>&1 || true
 done || true
+
+# Чужие сессии (в списке «?») CLI по имени не находит — он ищет только в своём файле состояния.
+# Поэтому добавляем запись с известным endpoint: при остановке CLI сам подтянет к ней токен
+# с сервера и освободит назначение. Именно такая сессия обычно и держит квоту.
+i=0
+printf '%s\n' "$SESSION_LINES" | python3 -c "
+import re, sys
+for line in sys.stdin:
+    match = re.match(r'\[\?\]\s+(\S+)\s+\|', line.strip())
+    if match:
+        print(match.group(1))
+" | while read -r endpoint; do
+    i=$((i + 1))
+    name="orphan-${i}"
+    echo "  чужая сессия ${endpoint} → беру как ${name} и останавливаю"
+    python3 - "$STATE" "$name" "$endpoint" <<'PY'
+import json, pathlib, sys
+
+state, name, endpoint = sys.argv[1:4]
+path = pathlib.Path(state)
+data = json.loads(path.read_text()) if path.exists() else {}
+data[name] = {"name": name, "token": "", "url": "", "endpoint": endpoint,
+              "variant": "GPU", "accelerator": "T4", "machine_shape": "STANDARD"}
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+PY
+    colab stop -s "$name" >/dev/null 2>&1 || true
+done || true
+
+if colab sessions 2>/dev/null | grep -q '^\[?\]'; then
+    echo "  ВНИМАНИЕ: сессия «?» всё ещё висит. Значит освободить её из терминала не вышло —"
+    echo "  завершите вручную: colab.research.google.com → Manage sessions → Terminate."
+fi
 
 fail() {
     echo
