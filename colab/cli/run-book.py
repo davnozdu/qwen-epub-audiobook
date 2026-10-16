@@ -290,8 +290,32 @@ def fetch_book(url: str, target_dir: pathlib.Path) -> pathlib.Path:
     return target
 
 
+def fetch_plan(colab: str, session: str, stem: str, target_dir: pathlib.Path) -> dict | None:
+    """Забираем план нарезки, если задание резало книгу. Нет плана — книга влезла целиком."""
+    remote = f"/content/out/{stem}-parts/plan.json"
+    local = target_dir / f"{stem}-plan.json"
+    if run_quiet([colab, "download", "-s", session, remote, str(local)]).returncode != 0:
+        return None
+    try:
+        return json.loads(local.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def fetch_parts(colab: str, session: str, plan: dict | None, target_dir: pathlib.Path) -> list:
+    """Части книги сохраняем и локально: первые обрабатываются, остальные лежат на Drive."""
+    if not plan or plan.get("parts", 1) <= 1:
+        return []
+    saved = []
+    for item in plan["files"]:
+        local = target_dir / pathlib.Path(item["epub"]).name
+        if run_quiet([colab, "download", "-s", session, item["epub"], str(local)]).returncode == 0:
+            saved.append(local)
+    return saved
+
+
 def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
-                   drive_dir: str, job: pathlib.Path) -> pathlib.Path:
+                   drive_dir: str, job: pathlib.Path, shrink: dict) -> pathlib.Path:
     """Задание уходит на машину вместе с аргументами: colab exec аргументы не передаёт."""
     args = [book_remote]
     if fragment:
@@ -299,6 +323,10 @@ def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
     if highlight:
         args += ["--highlight", highlight]
     args += ["--drive-dir", drive_dir] if drive else ["--no-drive"]
+    if shrink.get("off"):
+        args += ["--no-shrink"]
+    else:
+        args += ["--max-hours", str(shrink["max_hours"]), "--shrink-dir", str(shrink["dir"])]
     head = ("import sys\n"
             f"sys.argv = {json.dumps(['qwen_tts_book.py', *args])}\n"
             '__name__ = "__main__"\n')
@@ -330,6 +358,12 @@ def main() -> int:
                         help="папка внутри MyDrive")
     parser.add_argument("--drive-wait", type=int, default=int(os.environ.get("DRIVE_WAIT", "120")),
                         help="сколько секунд ждать подтверждения Drive")
+    parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
+                        help="если книга длиннее — задание разрежет её на части (0 — не резать)")
+    parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
+                        help="папка на Drive для остальных частей")
+    parser.add_argument("--no-shrink", action="store_true", default=os.environ.get("SHRINK", "1") == "0",
+                        help="не резать книгу на части")
     parser.add_argument("--no-caffeinate", action="store_true",
                         default=os.environ.get("CAFFEINATE", "1") == "0",
                         help="macOS: не мешать маку засыпать (по умолчанию мешаем)")
@@ -360,8 +394,7 @@ def main() -> int:
     book = book.resolve()
     stem = book.stem or "book"
     remote_book = f"/content/{stem}.epub"
-    remote_zip = f"/content/out/{stem}.zip"
-    local_zip = downloads_dir() / f"{stem}.zip"
+    shrink = {"max_hours": args.max_hours, "dir": args.shrink_dir, "off": args.no_shrink}
 
     def fail() -> int:
         print("\n== не получилось, освобождаю машину ==")
@@ -388,7 +421,8 @@ def main() -> int:
     if run([colab, "upload", "-s", args.session, str(book), remote_book]).returncode != 0:
         return fail()
 
-    generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir, job)
+    generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir,
+                               job, shrink)
     print("\n== задание ==")
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
@@ -399,6 +433,14 @@ def main() -> int:
         print(f"== CLI вернул код {code} — это может быть таймаут ожидания кернела, а не ошибка задания")
 
     print("\n== забираю архив ==")
+    # Толстая книга режется на части ещё на машине: узнаём по плану, как называется архив.
+    plan = fetch_plan(colab, args.session, stem, downloads_dir())
+    if plan and plan.get("parts", 1) <= 1:
+        print(f"оценка: книга ≈{plan['estimated_hours']:.2f} ч звука (~столько же часов GPU)")
+    effective = f"{stem}-part1" if plan and plan.get("parts", 1) > 1 else stem
+    remote_zip = f"/content/out/{effective}.zip"
+    local_zip = downloads_dir() / f"{effective}.zip"
+
     # Машину при неудаче НЕ гасим: готовый архив может уже лежать на ней, а после stop он пропадёт.
     if run([colab, "download", "-s", args.session, remote_zip, str(local_zip)]).returncode != 0:
         print("архива на машине нет (или он ещё собирается). Машину не гашу, чтобы не потерять работу.")
@@ -409,6 +451,23 @@ def main() -> int:
     if local_zip.is_file():
         print(f"{sha256_of(local_zip)}  {local_zip.name}")
     print(f"готово: {local_zip}")
+
+    if plan and plan.get("parts", 1) > 1:
+        saved = fetch_parts(colab, args.session, plan, downloads_dir())
+        print()
+        print("=" * 74)
+        print(f"КНИГА БЫЛА БОЛЬШОЙ: ≈{plan['estimated_hours']:.1f} ч звука, разрезана на {plan['parts']} части.")
+        print("Сейчас готова только первая. Остальные части обрабатывайте ОТДЕЛЬНО — каждую своим запуском;")
+        print(f"они уже лежат на Google Drive в папке «{plan.get('shrink_dir', 'Audiobooks-shrink')}» и локально.")
+        for index, item in enumerate(plan["files"], 1):
+            state = "готова (этот запуск)" if index == 1 else "обработать отдельно"
+            local_note = ""
+            if index > 1 and saved:
+                local_note = f" | локально: {pathlib.Path(item['epub']).name}"
+            print(f"  часть {index}: ≈{item['estimated_hours']:.1f} ч — {state}{local_note}")
+        for index, item in enumerate(plan["files"][1:], 2):
+            print(f"    ./run-book.command {pathlib.Path(item['epub']).name}")
+        print("=" * 74)
 
     if args.keep_session:
         print(f"машина оставлена (--keep-session): следующая книга пойдёт быстрее.")

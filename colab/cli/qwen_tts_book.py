@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import pathlib
 import shutil
@@ -137,6 +138,52 @@ def ensure_runner(repo_url, repo_dir):
     return runner
 
 
+def shrink_step(runner, book, args):
+    """Толстую книгу режем на части: в обработку идёт первая, остальные уезжают на Drive.
+
+    Возвращает книгу, которую надо обрабатывать: исходную или первую часть.
+    Проверка и нарезка идут на CPU до всякого синтеза, поэтому стоят минуты, а не часы.
+    """
+    if args.no_shrink or args.max_hours <= 0:
+        return book
+    repo = runner.parent.parent
+    splitter = repo / "shrink_book.py"
+    if not splitter.is_file():
+        print(f"нарезка недоступна: в клоне нет {splitter} — обрабатываю книгу целиком")
+        return book
+
+    base = pathlib.Path("/content/out") if pathlib.Path("/content").is_dir() else pathlib.Path.cwd() / "out"
+    parts_dir = base / f"{book.stem}-parts"
+    banner("Нарезка: влезает ли книга в разумное время")
+    command = [sys.executable, str(splitter), str(book), "--out", str(parts_dir),
+               "--max-hours", str(args.max_hours), "--drive-dir", str(args.shrink_dir)]
+    if args.no_drive or not DRIVE_ROOT.is_dir():
+        command.append("--no-drive")          # Drive не подключён — части останутся только локально
+    print("   " + " ".join(command), flush=True)
+    done = subprocess.run(command, cwd=str(repo), text=True, env=dict(os.environ, PYTHONPATH=str(repo)))
+
+    plan_path = parts_dir / "plan.json"
+    if done.returncode != 0 or not plan_path.is_file():
+        print("нарезка не удалась — продолжаю с книгой целиком.")
+        print("  учтите: если книга длиннее сессии Colab, синтез может не дожить до конца.")
+        return book
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    if plan.get("parts", 1) <= 1:
+        return book
+
+    first = pathlib.Path(plan["files"][0]["epub"])
+    assert first.is_file(), f"нет первой части: {first}"
+    banner("Книга большая — обрабатываю первую часть")
+    print(f"  всего ≈{plan['estimated_hours']:.1f} ч звука, частей: {plan['parts']}")
+    print(f"  в обработку: {first.name} (≈{plan['files'][0]['estimated_hours']:.1f} ч) — "
+          f"после неё будет {first.stem}.zip")
+    print(f"  остальные части: на Google Drive в папке «{args.shrink_dir}» и рядом с книгой локально;")
+    print("  каждую обрабатывайте отдельным запуском:")
+    for item in plan["files"][1:]:
+        print(f"    {pathlib.Path(item['epub']).name}  (≈{item['estimated_hours']:.1f} ч)")
+    return first
+
+
 def run_pipeline(args, runner, book):
     command = [sys.executable, str(runner), str(book),
                "--out", str(args.out), "--highlight", args.highlight,
@@ -227,6 +274,12 @@ def main():
     parser.add_argument("--drive-dir", default="Audiobooks-colab",
                         help="папка внутри MyDrive; внутри неё — папка с именем книги")
     parser.add_argument("--no-drive", action="store_true", help="не копировать архив на Google Drive")
+    parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
+                        help="если книга длиннее — резать на части (0 — не резать)")
+    parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
+                        help="папка на Drive, куда кладутся остальные части")
+    parser.add_argument("--no-shrink", action="store_true", default=os.environ.get("SHRINK", "1") == "0",
+                        help="не резать книгу на части")
     parser.add_argument("--local", action="store_true",
                         help="локальный прогон (macOS/Metal): без pip install и без требования GPU")
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)
@@ -251,8 +304,9 @@ def main():
     # каждому epub — свой каталог проекта: id сегментов у разных книг совпадают, кэши нельзя мешать
     stem = pathlib.Path(args.book.split("?")[0]).stem or "book"
     base = pathlib.Path("/content/out") if pathlib.Path("/content").is_dir() else pathlib.Path.cwd() / "out"
-    args.out = pathlib.Path(args.out or base / stem)
-    args.zip = pathlib.Path(args.zip or base / f"{stem}.zip")
+    args.out = pathlib.Path(args.out) if args.out else None
+    args.zip = pathlib.Path(args.zip) if args.zip else None
+    base_dir = base
 
     banner("Параметры запуска")
     for key, value in vars(args).items():
@@ -262,6 +316,15 @@ def main():
     book = find_book(args.book)
     print("\nкнига:", book, f"{book.stat().st_size / 1e6:.2f} МБ")
     runner = ensure_runner(args.repo_url, args.repo_dir)
+
+    book = shrink_step(runner, book, args)
+
+    # каталог проекта и имя архива считаем от итоговой книги: у части это её собственное имя
+    stem = pathlib.Path(book.name).stem or stem
+    base = pathlib.Path("/content/out") if pathlib.Path("/content").is_dir() else pathlib.Path.cwd() / "out"
+    args.out = pathlib.Path(args.out or base / stem)
+    args.zip = pathlib.Path(args.zip or base / f"{stem}.zip")
+    os.environ["STEM"] = stem          # обёртка по нему найдёт архив и части
 
     pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
     run_pipeline(args, runner, book)

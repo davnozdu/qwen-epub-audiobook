@@ -283,6 +283,18 @@ def main() -> int:
           "colab_run_all.py: кэш графов MLX/CUDA тоже увеличен (на нём синтез падал следом)")
     check('MLX_ENABLE_CACHE_THRASHING_CHECK' in all_stages and 're.search' in all_stages,
           "colab_run_all.py: разбирает имя переменной из сообщения MLX и имеет последнюю ступень")
+    splitter = (clone / "shrink_book.py").read_text(encoding="utf-8")
+    check("build_text_epub" in splitter,
+          "shrink_book.py: части книги собираются тем же сборщиком текста, что и конвейер")
+    check("Audiobooks-shrink" in splitter and '"plan.json"' in splitter.replace("'", '"'),
+          "shrink_book.py: пишет план нарезки и папку для частей на Drive")
+    job_text = (clone / "colab/cli/qwen_tts_book.py").read_text(encoding="utf-8")
+    check("book = shrink_step(" in job_text and "def shrink_step(" in job_text,
+          "задание режет толстую книгу перед конвейером и продолжает с первой части")
+    wrapper = (clone / "colab/cli/run-book.py").read_text(encoding="utf-8")
+    check("def fetch_plan(" in wrapper and "def fetch_parts(" in wrapper,
+          "обёртка забирает план нарезки и сами части локально")
+    check('"--max-hours"' in wrapper, "обёртка передаёт заданию порог нарезки")
 
     section("3. Ячейки ноутбуков")
     for path in sorted(clone.glob("colab/**/*.ipynb")):
