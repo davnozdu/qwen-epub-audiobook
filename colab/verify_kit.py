@@ -299,6 +299,27 @@ def main() -> int:
     check("def fetch_plan(" in wrapper and "def fetch_parts(" in wrapper,
           "обёртка забирает план нарезки и сами части локально")
     check('"--max-hours"' in wrapper, "обёртка передаёт заданию порог нарезки")
+    # Уведомления в Telegram: необязательные, без ключа ничего не делают, ключ нигде не зашит.
+    notify_text = (clone / "telegram_notify.py").read_text(encoding="utf-8")
+    check("TELEGRAM_BOT_TOKEN" in notify_text and "def notify(" in notify_text,
+          "telegram_notify.py: ключ берётся из окружения и есть функция отправки")
+    code_tg, out_tg = sh([PY, "telegram_notify.py", "проверка"], clone,
+                         env={k: v for k, v in os.environ.items()
+                              if k not in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")})
+    check(code_tg == 0 and "нет ключа" in out_tg,
+          "telegram_notify.py: без ключа молча ничего не отправляет (код 0)")
+    leak = []
+    for path in sorted(clone.rglob("*")):
+        if path.is_file() and path.suffix in (".py", ".md", ".txt", ".json", ".command", ".cmd", ".ipynb"):
+            try:
+                text_file = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if re.search(r"\b\d{8,12}:[A-Za-z0-9_-]{30,}", text_file):
+                leak.append(str(path.relative_to(clone)))
+    check(not leak, f"в репозитории нет зашитых ключей ботов: {leak}")
+    check('"--env"' in wrapper and "TELEGRAM_BOT_TOKEN" in wrapper,
+          "обёртка передаёт ключи уведомлений на машину через --env")
     check("def stream_step(" in wrapper and "def clickable(" in wrapper and "def open_browser(" in wrapper,
           "обёртка печатает ссылку авторизации кликабельной и открывает браузер")
     check('"--no-open"' in wrapper and "supports_hyperlinks" in wrapper,

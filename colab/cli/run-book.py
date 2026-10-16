@@ -60,6 +60,15 @@ def banner(text: str) -> None:
 
 
 # ────────────────────────────── где лежит CLI ──────────────────────────────
+def notify_telegram(message: str) -> None:
+    """Уведомление в Telegram, если задан TELEGRAM_BOT_TOKEN. Без ключа — тишина."""
+    try:
+        import telegram_notify
+        telegram_notify.notify(message)
+    except Exception:
+        pass
+
+
 def find_colab() -> str:
     found = shutil.which("colab")
     if found:
@@ -220,6 +229,7 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
                 sys.stdout.write(clickable(piece))     # подсвечиваем только ссылку авторизации Drive
                 if piece not in links:
                     links.append(piece)
+                    notify_telegram("🔗 Подтвердите доступ к Google Drive:\n" + piece)
                     # подтверждение ждём с момента, когда ссылка показана, а не с запуска
                     deadline = time.monotonic() + max(1.0, timeout)
             else:
@@ -505,6 +515,10 @@ def main() -> int:
     parser.add_argument("--open", action="store_true", default=os.environ.get("AUTO_OPEN", "0") == "1",
                         help="открывать браузер со ссылкой авторизации Drive "
                              "(по умолчанию выключено: ссылка просто подсвечивается)")
+    parser.add_argument("--telegram-token", default=None,
+                        help="ключ бота от @BotFather: шлём стадии и итог в Telegram")
+    parser.add_argument("--telegram-chat", default=None,
+                        help="куда слать (не обязательно: найдём чат по последнему сообщению боту)")
     parser.add_argument("--no-open", action="store_true", help="оставлено для совместимости: браузер и так не открываем")
     parser.add_argument("--no-caffeinate", action="store_true",
                         default=os.environ.get("CAFFEINATE", "1") == "0",
@@ -516,6 +530,11 @@ def main() -> int:
         parser.print_help()
         print("\nпример: run-book.command kniga.epub   |   run-book.cmd kniga.epub")
         return 1
+
+    if args.telegram_token:                      # ключи можно задать и ключом, и переменной
+        os.environ["TELEGRAM_BOT_TOKEN"] = args.telegram_token
+    if args.telegram_chat:
+        os.environ["TELEGRAM_CHAT_ID"] = args.telegram_chat
 
     here = pathlib.Path(__file__).resolve().parent
     job = here / "qwen_tts_book.py"
@@ -540,6 +559,7 @@ def main() -> int:
 
     def fail() -> int:
         print("\n== не получилось, освобождаю машину ==")
+        notify_telegram(f"⚠️ Не получилось поднять машину или залить книгу «{stem}» — смотрите вывод.")
         if not args.keep_session:
             run_quiet([colab, "stop", "-s", args.session])
         return 1
@@ -550,6 +570,7 @@ def main() -> int:
         print("  завершите вручную: colab.research.google.com → Manage sessions → Terminate.")
 
     print(f"\n== поднимаю сессию {args.session} ({args.gpu}) ==")
+    notify_telegram(f"🚀 Поднимаю машину Colab ({args.gpu}) для «{stem}»")
     if run([colab, "new", "-s", args.session, "--gpu", args.gpu]).returncode != 0:
         return fail()
 
@@ -569,7 +590,11 @@ def main() -> int:
     print("\n== задание ==")
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
-        code = run([colab, "exec", "-s", args.session, "-f", str(generated), "--timeout", "86400"]).returncode
+        command = [colab, "exec", "-s", args.session, "-f", str(generated), "--timeout", "86400"]
+        for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):     # уведомления работают и с машины
+            if os.environ.get(key):
+                command += ["--env", f"{key}={os.environ[key]}"]
+        code = run(command).returncode
     finally:
         generated.unlink(missing_ok=True)
     if code != 0:
@@ -594,6 +619,7 @@ def main() -> int:
     if local_zip.is_file():
         print(f"{sha256_of(local_zip)}  {local_zip.name}")
     print(f"готово: {local_zip}")
+    notify_telegram(f"✅ Архив готов: {local_zip.name}\n{sha256_of(local_zip)[:16]}… · {local_zip}")
 
     if plan and plan.get("parts", 1) > 1:
         saved = fetch_parts(colab, args.session, plan, downloads_dir())

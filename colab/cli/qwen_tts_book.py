@@ -69,6 +69,15 @@ def banner(text):
     print(f"\n{'=' * 74}\n{text}\n{'=' * 74}", flush=True)
 
 
+def notify_telegram(text_to_send: str) -> None:
+    """Уведомление в Telegram, если заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. Иначе тишина."""
+    try:
+        import telegram_notify
+        telegram_notify.notify(text_to_send)
+    except Exception:
+        pass
+
+
 def auto_book():
     """Книга не задана: берём единственный epub в /content или на подключённом Drive."""
     roots = [pathlib.Path("/content"), pathlib.Path("/content/drive/MyDrive")]
@@ -210,10 +219,16 @@ def shrink_step(runner, book, args):
         return book
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     if plan.get("parts", 1) <= 1:
+        notify_telegram(f"📚 «{book.stem}»: ≈{plan['estimated_hours']:.1f} ч звука — "
+                        f"влезает в одну сессию, резать не надо")
         return book
 
     first = pathlib.Path(plan["files"][0]["epub"])
     assert first.is_file(), f"нет первой части: {first}"
+    notify_telegram(f"📚 Книга большая: ≈{plan['estimated_hours']:.1f} ч звука, режу на {plan['parts']} части.\n"
+                    f"В работу идёт {first.name} (≈{plan['files'][0]['estimated_hours']:.1f} ч), "
+                    f"остальные — на Google Drive в папке «{args.shrink_dir}» и локально, "
+                    f"их обрабатывают отдельными запусками.")
     banner("Книга большая — обрабатываю первую часть")
     print(f"  всего ≈{plan['estimated_hours']:.1f} ч звука, частей: {plan['parts']}")
     print(f"  в обработку: {first.name} (≈{plan['files'][0]['estimated_hours']:.1f} ч) — "

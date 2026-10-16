@@ -43,6 +43,21 @@ import sys
 import time
 from pathlib import Path
 
+# Уведомления в Telegram — необязательные: без ключа в окружении просто ничего не отправляется.
+try:
+    from telegram_notify import notify as _notify
+except Exception:                     # модуля может не быть в старой копии репозитория
+    def _notify(text, **kwargs):      # noqa: D401
+        return False
+
+
+def tg(text) -> None:
+    """Короткая обёртка: ошибки уведомлений не должны ломать сборку."""
+    try:
+        _notify(text)
+    except Exception:
+        pass
+
 REPO = Path(__file__).resolve().parent.parent          # корень репозитория
 MODEL_REPO = "siriusfreak/qwen3-tts-12hz-1.7b-ru-stress-cf"
 MODEL_NAME = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
@@ -84,6 +99,7 @@ CACHE_STEPS = [_cache_env(1), _cache_env(2), _cache_env(4), {"MLX_ENABLE_CACHE_T
 
 def banner(step, text):
     print(f"\n{'=' * 72}\n[{STAGES.index(step) + 1}/{len(STAGES)}] {text}\n{'=' * 72}", flush=True)
+    tg(f"⚙️[{STAGES.index(step) + 1}/{len(STAGES)}] {text}")
 
 
 def run(cmd, **kwargs):
@@ -224,6 +240,7 @@ def stage_deps(args):
     if not on_gpu:
         print("  (--skip-gpu-check: продолжаю без GPU, синтез на этой машине работать не будет)")
     print("✓ зависимости и MLX на месте")
+    tg(f"🚀 Собралось начать\nкнига: {Path(args.book).name}\nмашина: {gpu or 'CPU'}")
 
 
 # ─────────────────────────── 3. репозиторий ───────────────────────────
@@ -424,6 +441,8 @@ def stage_prepare(args, project):
     if not seconds:
         seconds = sum(len(row["text"]) / 14 + row["pause_after_ms"] / 1000
                       for row in prepared["segments"])
+    tg(f"🎧 Озвучка: {prepared['summary']['segments']} сегментов, "
+       f"ожидаемое время звука ≈{seconds / 3600:.1f} ч (примерно столько же часов GPU)")
     print("сегментов на озвучку:", prepared["summary"]["segments"],
           "| абзацев:", prepared["summary"]["paragraphs"],
           "| голосов:", prepared["summary"]["voices"],
@@ -584,7 +603,13 @@ def main():
     if limit >= STAGES.index("package"):
         stage_package(args, source, with_music)
 
+    spent_minutes = (time.time() - started) / 60
     print(f"\nвсе стадии до «{args.upto}» пройдены за {time.time() - started:.0f} с")
+    if args.upto == "package":
+        result = Path(args.out) / "project" / "result"
+        tg(f"✅ Готово за {spent_minutes:.0f} мин\nкнига: {Path(args.book).name}\n"
+           f"файлы: book.m4b и book-read-along.epub")
+        print("итог:", result / "book.m4b")
     if args.upto == "package":
         print("итог:", (source.parent / "result" / "book.m4b"))
 
