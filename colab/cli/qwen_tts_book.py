@@ -61,6 +61,7 @@ def default_model_dir() -> pathlib.Path:
 
 MODEL_DIR = default_model_dir()
 RESULT_FILES = ("book.m4b", "book-read-along.epub")
+DRIVE_ROOT = pathlib.Path(os.environ.get("COLAB_DRIVE_ROOT", "/content/drive/MyDrive"))
 
 
 def banner(text):
@@ -180,15 +181,22 @@ def pack(args, book):
     print(f"размер     : {archive.stat().st_size / 1e6:.1f} МБ")
     print(f"sha256     : {digest}")
 
-    drive_root = pathlib.Path("/content/drive/MyDrive")
-    if drive_root.is_dir():
-        drive_dir = drive_root / "audiobooks"
-        drive_dir.mkdir(parents=True, exist_ok=True)
-        copy = drive_dir / archive.name
-        shutil.copyfile(archive, copy)
-        print(f"на Google Drive: {copy}")
+    if args.no_drive:
+        print("на Google Drive не копирую: --no-drive")
     else:
-        print("Google Drive не подключён (colab drivemount -s <сессия>) — забирайте архив командой:")
+        if DRIVE_ROOT.is_dir():
+            drive_dir = DRIVE_ROOT / args.drive_dir
+            try:
+                drive_dir.mkdir(parents=True, exist_ok=True)
+                copy = drive_dir / archive.name
+                shutil.copyfile(archive, copy)
+                print(f"на Google Drive: {copy}")
+            except OSError as exc:
+                print(f"Drive подключён, но записать в {drive_dir} не вышло: {exc}")
+        else:
+            print(f"Google Drive не подключён — папку «{args.drive_dir}» не пополняю.")
+            print("  подключить (один раз на машину): colab drivemount -s <сессия>")
+            print("  затем повторить задание, либо забрать архив вручную: colab download ...")
 
     print("\nскачать на свой диск:\n"
           f"  colab download -s <сессия> {archive} ~/Downloads/{archive.name}")
@@ -209,6 +217,9 @@ def main():
     parser.add_argument("--model-dir", default=str(MODEL_DIR), help="где держать веса модели синтеза")
     parser.add_argument("--repo-url", default=REPO_URL, help="откуда клонировать конвейер")
     parser.add_argument("--repo-dir", default=str(REPO_DIR), help="куда клонировать конвейер")
+    parser.add_argument("--drive-dir", default="Audiobooks-colab",
+                        help="папка внутри MyDrive на подключённом Google Drive")
+    parser.add_argument("--no-drive", action="store_true", help="не копировать архив на Google Drive")
     parser.add_argument("--local", action="store_true",
                         help="локальный прогон (macOS/Metal): без pip install и без требования GPU")
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)

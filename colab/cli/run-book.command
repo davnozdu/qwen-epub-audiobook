@@ -20,6 +20,9 @@
 #   HIGHLIGHT=fragment  подсветка по абзацам: сегментов меньше, синтез быстрее
 #   KEEP_SESSION=1      не гасить машину в конце: следующая книга пойдёт без установки
 #                       пакетов и без повторной загрузки весов (потом: colab stop -s book)
+#   DRIVE=1             подключить Google Drive и положить архив в MyDrive/Audiobooks-colab
+#                       (по умолчанию 1; 0 — не подключать)
+#   DRIVE_DIR=...       папка внутри MyDrive (по умолчанию Audiobooks-colab)
 set -euo pipefail
 
 BOOK="${1:-}"
@@ -116,6 +119,17 @@ echo
 echo "== поднимаю сессию $SESSION ($GPU) =="
 colab new -s "$SESSION" --gpu "$GPU" || fail
 
+DRIVE="${DRIVE:-1}"
+DRIVE_DIR="${DRIVE_DIR:-Audiobooks-colab}"
+if [ "$DRIVE" = "1" ]; then
+    echo
+    echo "== подключаю Google Drive (если появится ссылка — разрешить доступ и нажать Enter) =="
+    if ! colab drivemount -s "$SESSION"; then
+        echo "  Drive не подключился: архив всё равно заберём в ~/Downloads."
+        DRIVE=0
+    fi
+fi
+
 echo
 echo "== книга на машину: $STEM =="
 colab upload -s "$SESSION" "$BOOK" "$REMOTE_BOOK" || fail
@@ -125,15 +139,19 @@ colab upload -s "$SESSION" "$BOOK" "$REMOTE_BOOK" || fail
 TMP_BASE="${TMPDIR:-/tmp}"; TMP_BASE="${TMP_BASE%/}"
 GENERATED="$(mktemp "$TMP_BASE/qwen-book-XXXXXX.py")"
 trap 'rm -f "$GENERATED"' EXIT
-python3 - "$GENERATED" "$REMOTE_BOOK" "${FRAGMENT:-}" "${HIGHLIGHT:-}" "$JOB" <<'PY'
+python3 - "$GENERATED" "$REMOTE_BOOK" "${FRAGMENT:-}" "${HIGHLIGHT:-}" "$DRIVE" "$DRIVE_DIR" "$JOB" <<'PY'
 import json, pathlib, sys
 
-generated, book, fragment, highlight, job = sys.argv[1:6]
+generated, book, fragment, highlight, drive, drive_dir, job = sys.argv[1:8]
 args = [book]
 if fragment:
     args += ["--seconds", fragment]
 if highlight:
     args += ["--highlight", highlight]
+if drive == "1":
+    args += ["--drive-dir", drive_dir]
+else:
+    args += ["--no-drive"]
 head = ("import sys\n"
         f"sys.argv = {json.dumps(['qwen_tts_book.py', *args])}\n"
         "__name__ = \"__main__\"\n")
