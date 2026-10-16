@@ -279,7 +279,8 @@ def drive_link(path) -> str:
     except AttributeError:                  # macOS: нет os.getxattr — берём через команду xattr
         try:
             done = subprocess.run(["xattr", "-p", "user.drive.id", str(path)],
-                                  capture_output=True, text=True, timeout=10)
+                                  capture_output=True, text=True, timeout=10,
+                                  env=dict(os.environ))
             file_id = done.stdout.strip() if done.returncode == 0 else ""
         except Exception:
             file_id = ""

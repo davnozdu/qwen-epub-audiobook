@@ -366,7 +366,8 @@ def probe_session(colab: str, session: str, timeout: float = 90) -> bool:
     LAST_OUTPUT = ""
     try:
         process = subprocess.run([colab, "exec", "-s", session, "-f", str(probe), "--timeout", "60"],
-                                 capture_output=True, text=True, timeout=timeout)
+                                 capture_output=True, text=True, timeout=timeout,
+                                 env=dict(os.environ))
     except subprocess.TimeoutExpired:
         return False
     finally:
