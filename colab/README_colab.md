@@ -53,7 +53,7 @@ colab stop -s book
 
 Во всех случаях на выходе `/content/out/<имя книги>.zip` c `book.m4b` и `book-read-along.epub`
 внутри; путь, размер и sha256 печатаются в конце. Обёртка подключает Google Drive и кладёт
-`book.m4b` и read-along epub — под именем книги — в `MyDrive/Audiobooks-cli/<имя книги>/`
+`book.m4b` и read-along epub — под именем книги — в `MyDrive/Audiobooks-colab/<имя книги>/`
 (той же учётной записью, без отдельной авторизации: один раз за сессию `colab drivemount`).
 Ждёт подтверждения 120 с (`DRIVE_WAIT`): не дождалась, нажали Enter без доступа или монтирование
 упало — Drive пропускается, zip всё равно скачивается в `~/Downloads`. `DRIVE=0` отключает Drive,

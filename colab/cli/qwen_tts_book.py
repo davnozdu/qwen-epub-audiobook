@@ -224,7 +224,7 @@ def main():
     parser.add_argument("--model-dir", default=str(MODEL_DIR), help="где держать веса модели синтеза")
     parser.add_argument("--repo-url", default=REPO_URL, help="откуда клонировать конвейер")
     parser.add_argument("--repo-dir", default=str(REPO_DIR), help="куда клонировать конвейер")
-    parser.add_argument("--drive-dir", default="Audiobooks-cli",
+    parser.add_argument("--drive-dir", default="Audiobooks-colab",
                         help="папка внутри MyDrive; внутри неё — папка с именем книги")
     parser.add_argument("--no-drive", action="store_true", help="не копировать архив на Google Drive")
     parser.add_argument("--local", action="store_true",

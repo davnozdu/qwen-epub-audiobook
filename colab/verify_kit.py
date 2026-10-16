@@ -249,6 +249,16 @@ def main() -> int:
                     continue
                 check("env=" in window, f"{rel}: PYTHONPATH у дочернего процесса — {line.strip()[:50]}")
 
+    # Файл с маковым путём, который Colab не патчит, роняет прогон на Linux — уже случалось,
+    # когда в репозиторий попал новый скрипт с /opt/homebrew/bin/ffmpeg.
+    skip_match = re.search(r"PATCH_SKIP = \{([^}]*)\}", (clone / "colab/colab_run_all.py").read_text(encoding="utf-8"))
+    patch_skip = set(re.findall(r'"([^"]+)"', skip_match.group(1))) if skip_match else set()
+    mac_only = [f"{path.name}:{number}" for path in sorted(clone.glob("*.py"))
+                if path.name not in patch_skip
+                for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+                if "/opt/homebrew" in line]
+    check(not mac_only, f"маковые пути только в файлах из PATCH_SKIP: {mac_only}")
+
     all_stages = (clone / "colab/colab_run_all.py").read_text(encoding="utf-8")
     match = re.search(r"STAGES = \[(.*?)\]", all_stages, re.S)
     stages = re.findall(r'"([a-z]+)"', match.group(1)) if match else []
