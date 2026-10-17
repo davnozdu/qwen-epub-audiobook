@@ -304,7 +304,12 @@ def pack(args, book):
         for name in RESULT_FILES:
             zf.write(result / name, arcname=name)
 
-    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    # Хеш считаем потоком: read_bytes() по архиву в сотни МБ мог выбить память на машине.
+    hasher = hashlib.sha256()
+    with archive.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            hasher.update(chunk)
+    digest = hasher.hexdigest()
     banner("Готово")
     with zipfile.ZipFile(archive) as zf:
         for info in zf.infolist():

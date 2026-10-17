@@ -665,7 +665,9 @@ def sha256_of(path: pathlib.Path) -> str:
 def fetch_book(url: str, target_dir: pathlib.Path) -> pathlib.Path:
     target = target_dir / pathlib.Path(url.split("?")[0]).name
     print(f"== качаю книгу к себе: {target} ==")
-    urllib.request.urlretrieve(url, target)
+    # urlretrieve не умеет таймаут: мёртвая ссылка вешала бы обёртку навсегда.
+    with urllib.request.urlopen(url, timeout=120) as source, target.open("wb") as sink:
+        shutil.copyfileobj(source, sink, 1 << 16)
     return target
 
 
@@ -843,7 +845,8 @@ def main() -> int:
             print(f"  Drive подключён: book.m4b и read-along epub поедут в MyDrive/{args.drive_dir}/<имя книги>")
 
     print(f"\n== книга на машину: {stem} ==")
-    if run([colab, "upload", "-s", args.session, str(book), remote_book]).returncode != 0:
+    # Таймаут обязателен: зависшая сеть без него держит обёртку вечно.
+    if run([colab, "upload", "-s", args.session, str(book), remote_book], timeout=3600).returncode != 0:
         return fail()
 
     generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir,
@@ -855,7 +858,11 @@ def main() -> int:
         for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):     # уведомления работают и с машины
             if os.environ.get(key):
                 command += ["--env", f"{key}={os.environ[key]}"]
-        code = run(command).returncode
+        try:
+            code = run(command, timeout=90000).returncode     # сутки задания + запас
+        except subprocess.TimeoutExpired:
+            print("== CLI не вернулся после задания — снимаю попытку (на машине оно могло ещё идти) ==")
+            code = 2
     finally:
         generated.unlink(missing_ok=True)
     if code != 0:
@@ -871,11 +878,12 @@ def main() -> int:
     local_zip = downloads_dir() / f"{effective}.zip"
 
     # Машину при неудаче НЕ гасим: готовый архив может уже лежать на ней, а после stop он пропадёт.
-    downloaded = run([colab, "download", "-s", args.session, remote_zip, str(local_zip)]).returncode == 0
+    downloaded = run([colab, "download", "-s", args.session, remote_zip, str(local_zip)],
+                     timeout=3600).returncode == 0
     if not downloaded:
         print("архив не забрался — пробую ещё раз (бывает сетевая осечка)")
-        downloaded = run([colab, "download", "-s", args.session, remote_zip,
-                          str(local_zip)]).returncode == 0
+        downloaded = run([colab, "download", "-s", args.session, remote_zip, str(local_zip)],
+                         timeout=3600).returncode == 0
     if not downloaded:
         print("архива на машине нет (или он ещё собирается).")
         if args.stop_on_failure:
