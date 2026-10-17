@@ -85,10 +85,17 @@ def project(original, predicted):
     for match, marked in zip(source, target):
         word = match.group()
         replacement = word
-        if "\u0301" not in word and "ё" not in word.lower() and ("\u0301" in marked or 'ё' in marked.lower()):
-            # Some Silero exceptions restore ё even with put_yo=False. Extract
-            # its stress position, never transfer changed letters into the book.
-            position = marked.index("\u0301") if '\u0301' in marked else marked.lower().index('ё')+1
+        if "\u0301" not in word and "ё" not in word.lower() and "ё" in marked.lower():
+            # Silero restored ё. ё is a letter, not an accent: transfer the
+            # letter itself; it carries the stress, so no U+0301 is added.
+            letters = marked.replace("\u0301", "")
+            if len(letters) == len(word):
+                replacement = "".join(
+                    ("Ё" if source.isupper() else "ё") if target.lower() == "ё" else source
+                    for source, target in zip(word, letters))
+        elif "\u0301" not in word and "ё" not in word.lower() and "\u0301" in marked:
+            # Rare Silero exception with a stress mark but no ё letter.
+            position = marked.index("\u0301")
             if sum(c.lower() in VOWELS for c in word) > 1:
                 replacement = word[:position] + "\u0301" + word[position:]
         parts.extend([original[end:match.start()], replacement])
@@ -111,6 +118,8 @@ def hybrid_text(original, dictionary_text, silero_text, homographs):
             value, engine = authored, "author"
         elif key in homographs:
             value, engine = neural, "silero_homograph"
+        elif "ё" in neural.lower() and "ё" not in known.lower():
+            value, engine = neural, "silero_yo"
         elif "\u0301" in known or "ё" in known.lower():
             value, engine = known, "dictionary"
         elif sum(c.lower() in VOWELS for c in authored) > 1:
@@ -144,7 +153,7 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
         # so that they cannot anchor Silero's independent contextual prediction.
         original = " ".join(s["tts_normalized"] for s in segments)
         clean = original.replace("\u0301", "")
-        prediction = accentor(clean, put_yo=False, put_yo_homo=False,
+        prediction = accentor(clean, put_yo=True, put_yo_homo=True,
                               stress_single_vowel=False)
         try:
             projected = project(original, prediction)
@@ -182,7 +191,7 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
         mode="hybrid" if strategy == "hybrid" else "silero", model=f"silero-stress-{package_version}", llm_policy="disabled",
         stress=any("\u0301" in s["tts_text"] for s in result["segments"]),
         stress_review=[], silero_seconds=round(time.monotonic()-start, 3),
-        silero_policy="independent full-paragraph prediction; original accents/letters preserved; yo restoration disabled",
+        silero_policy="independent full-paragraph prediction; author accents protected; yo restoration enabled (put_yo/put_yo_homo)",
         stress_strategy=strategy,
         silero_fallbacks=fallbacks,
         hybrid_policy="dictionary for marked unambiguous words; Silero for known homographs and unmarked words; author accents protected" if strategy == "hybrid" else None,
@@ -192,6 +201,8 @@ def prepare(manifest, accentor, package_version, dictionary_dir, strategy="hybri
               "segments": len(result["segments"]), "paragraphs": len(groups),
               "dictionary_acute_marks": sum(s["tts_dictionary_text"].count("\u0301") for s in result["segments"]),
               "final_acute_marks": sum(s["tts_text"].count("\u0301") for s in result["segments"]),
+              "yo_letters": sum(s["tts_text"].lower().count("ё") for s in result["segments"]),
+              "yo_restored": sum(max(0, s["tts_text"].lower().count("ё") - s["tts_normalized"].lower().count("ё")) for s in result["segments"]),
               "word_sources": dict(decisions_count),
               "silero_fallbacks": fallbacks,
               "different_words": len(changes), "changes": changes,
