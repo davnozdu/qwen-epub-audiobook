@@ -24,7 +24,8 @@ import urllib.request
 TOKEN_ENV = "TELEGRAM_BOT_TOKEN"
 CONFIG_ENV = "TELEGRAM_CONFIG"
 CHAT_ENV = "TELEGRAM_CHAT_ID"
-API = "https://api.telegram.org/bot{token}/{method}"
+API_ENV = "TELEGRAM_API_BASE"          # можно направить в свою копию Telegram API (тесты, прокси)
+API = "{base}/bot{token}/{method}"
 WARNED = set()          # чтобы не повторять одну и ту же подсказку на каждой стадии
 
 
@@ -36,9 +37,13 @@ def chat_from_env() -> str:
     return (os.environ.get(CHAT_ENV) or "").strip()
 
 
+def api_base() -> str:
+    return (os.environ.get(API_ENV) or "https://api.telegram.org").rstrip("/")
+
+
 def _call(token: str, method: str, payload: dict | None = None, timeout: int = 25) -> dict:
     data = urllib.parse.urlencode(payload or {}).encode()
-    request = urllib.request.Request(API.format(token=token, method=method), data=data)
+    request = urllib.request.Request(API.format(base=api_base(), token=token, method=method), data=data)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.load(response)
 
