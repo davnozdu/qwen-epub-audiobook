@@ -11,6 +11,13 @@ import tempfile
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
+# Мягкая обработка финальной речи — «полировка»: де-эссер снимает свист на «с/ш/ч», afftdn —
+# зернистость вокодера, полка −3 дБ выше 7 кГц убирает стеклянный призвук. Цепочка выбрана
+# прослушиванием на реальной книге (из шести вариантов: полка −5 дБ, шумоподавление, срез 8 кГц,
+# AAC 256k): этот дал живой тембр без потери разборчивости. Длительность НЕ меняется (проверяется
+# после фильтра), поэтому подсветка в read-along EPUB остаётся синхронной.
+POLISH_FILTER = "deesser=i=0.5:m=0.5,afftdn=nr=10:nf=-45,highshelf=f=7000:g=-3:t=q:w=0.7"
+
 
 def measure(path):
     result = subprocess.run([FFMPEG, "-hide_banner", "-nostats", "-i", str(path),
@@ -42,7 +49,49 @@ def pool(rows, folder, path, sr):
             writer.write(np.zeros(round(sr * 0.05), dtype=np.float32))
 
 
-def normalize(source, out, target=-20.0, peak_limit=-1.5):
+def wav_shape(path):
+    """Кадры/частота/каналы WAV из заголовка: длительность сверяем точно, без внешних библиотек."""
+    import wave
+    with wave.open(str(path), "rb") as handle:
+        return handle.getnframes(), handle.getframerate(), handle.getnchannels()
+
+
+def polish(path, target, peak_limit, filter_chain=POLISH_FILTER):
+    """Мягко обработать ГОТОВУЮ дорожку: тембр чище, длительность и громкость — как обещано.
+
+    Фильтр снимает верх и часть зернистости, поэтому после него громкость возвращаем к цели
+    ПОСТОЯННЫМ усилением (не лимитером): отчёт про -20 LUFS остаётся правдой, а пик не выходит
+    за peak_limit. Длительность сверяем по кадрам — от неё зависит подсветка в read-along EPUB.
+    """
+    path = Path(path)
+    before, shape = measure(path), wav_shape(path)
+    with tempfile.TemporaryDirectory(prefix="book-polish-") as temporary:
+        filtered = Path(temporary) / "filtered.wav"
+        subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
+                        "-af", filter_chain, "-c:a", "pcm_s16le", str(filtered)], check=True)
+        if wav_shape(filtered) != shape:
+            raise ValueError("Мягкая обработка изменила длительность или формат дорожки")
+        measured = measure(filtered)
+        gain = 0.0
+        if math.isfinite(measured["lufs"]) and math.isfinite(measured["true_peak_db"]):
+            gain = min(target - measured["lufs"], peak_limit - measured["true_peak_db"])
+        final = Path(temporary) / "final.wav"
+        command = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(filtered)]
+        if abs(gain) >= 0.05:
+            command += ["-af", f"volume={gain:.2f}dB"]
+        command += ["-c:a", "pcm_s16le", str(final)]
+        subprocess.run(command, check=True)
+        if wav_shape(final) != shape:
+            raise ValueError("Возврат громкости изменил длительность дорожки")
+        shutil.move(str(final), str(path))
+        after = measure(path)
+    return {"mode": "soft", "filter": filter_chain, "lufs_before": before["lufs"],
+            "lufs_filtered": measured["lufs"], "lufs_after": after["lufs"],
+            "true_peak_db": after["true_peak_db"], "gain_db": round(gain, 2),
+            "timing_unchanged": True}
+
+
+def normalize(source, out, target=-20.0, peak_limit=-1.5, polish_mode="soft"):
     import numpy as np
     import soundfile as sf
     source, out = Path(source).resolve(), Path(out).resolve()
@@ -99,6 +148,11 @@ def normalize(source, out, target=-20.0, peak_limit=-1.5):
                     writer.write(block * gain)
         if sf.info(out / "sample.wav").frames != info.frames:
             raise ValueError("Normalization changed duration")
+        polished = None
+        if polish_mode != "off":
+            polished = polish(out / "sample.wav", actual_target, peak_limit)
+            print(f"Полировка: {polished['lufs_before']:.2f} → {polished['lufs_after']:.2f} LUFS "
+                  f"(усиление {polished['gain_db']:+.2f} дБ), пик {polished['true_peak_db']:.2f} дБ", flush=True)
         after = {}
         for speaker, rows in grouped.items():
             pool(rows, out, pooled, info.samplerate)
@@ -110,7 +164,7 @@ def normalize(source, out, target=-20.0, peak_limit=-1.5):
                     "-codec:a", "libmp3lame", "-b:a", "192k", str(out / "sample.mp3")], check=True)
     report = dict(method="role-integrated EBU R128 measurement + constant gain", raw_audio=str(source),
                   requested_lufs=target, actual_lufs=actual_target, true_peak_limit_db=peak_limit,
-                  gains_db=gain_db, before=before, after=after, timing_unchanged=True)
+                  gains_db=gain_db, before=before, after=after, timing_unchanged=True, polish=polished)
     (out / "loudness.json").write_text(json.dumps(report, ensure_ascii=False, indent=2))
     benchmark.update(loudness_normalization=report, output_files={"wav": str(out / "sample.wav"), "mp3": str(out / "sample.mp3")})
     (out / "benchmark.json").write_text(json.dumps(benchmark, ensure_ascii=False, indent=2))
@@ -124,7 +178,9 @@ if __name__ == "__main__":
     parser.add_argument("--out", required=True)
     parser.add_argument("--target-lufs", type=float, default=-20)
     parser.add_argument("--true-peak", type=float, default=-1.5)
+    parser.add_argument("--polish", choices=["soft", "off"], default="soft",
+                        help="мягкая обработка готовой речи: тише свист и зернистость (off — выключить)")
     args = parser.parse_args()
     if not -40 <= args.target_lufs <= -10 or not -9 <= args.true_peak <= -1:
         parser.error("Unsafe loudness/peak target")
-    normalize(args.audio_dir, args.out, args.target_lufs, args.true_peak)
+    normalize(args.audio_dir, args.out, args.target_lufs, args.true_peak, args.polish)

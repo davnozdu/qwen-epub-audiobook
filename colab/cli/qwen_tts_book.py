@@ -292,6 +292,7 @@ def shrink_step(runner, book, args):
 def run_pipeline(args, runner, book):
     command = [sys.executable, str(runner), str(book),
                "--out", str(args.out), "--highlight", args.highlight,
+               "--polish", args.polish,
                "--model-dir", str(args.model_dir)]
     if args.seconds:
         command += ["--test-seconds", str(args.seconds)]
@@ -428,6 +429,9 @@ def main():
     parser.add_argument("--seconds", type=float, default=None, help="только фрагмент такой длительности")
     parser.add_argument("--highlight", choices=["sentence", "fragment"], default="sentence",
                         help="подсветка по предложениям (точнее) или по абзацам (быстрее: меньше сегментов)")
+    parser.add_argument("--polish", choices=["soft", "off"],
+                        default="off" if os.environ.get("POLISH", "1") == "0" else "soft",
+                        help="мягкая обработка готовой речи (по умолчанию включена; POLISH=0 или --polish off выключает)")
     parser.add_argument("--voice", default=None, help="свой образец голоса вместо вшитого в репозиторий")
     parser.add_argument("--model-dir", default=str(MODEL_DIR), help="где держать веса модели синтеза")
     parser.add_argument("--repo-url", default=REPO_URL, help="откуда клонировать конвейер")

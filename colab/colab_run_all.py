@@ -22,7 +22,7 @@
   8. voices   образец чтеца с GitHub → библиотека голосов под ПОДГОТОВЛЕННЫЙ манифест
               (именно этот хеш книги сверяет синтез, поэтому стадия идёт после prepare)
   9. synth    synthesize_qwen_mlx.py: MLX/CUDA, mode clone, rab-generation
- 10. normalize normalize_book_audio.py: громкость по LUFS
+ 10. normalize normalize_book_audio.py: громкость по LUFS + мягкая обработка речи (--polish)
  11. music    mix_book_music.py: фоновая музыка из репозитория (5 %)
  12. package  audiobook_epub.py package → book.m4b + book-read-along.epub
 
@@ -519,12 +519,26 @@ def stage_synth(args, source, library, model_dir):
 
 # ─────────────────────────── 10-11. громкость и музыка ───────────────────────────
 def stage_normalize(args, audio):
-    banner("normalize", "Громкость по LUFS")
+    banner("normalize", "Громкость по LUFS" + (" + мягкая обработка речи" if args.polish != "off" else ""))
     normalized = audio.parent / "audio-normalized"
-    if args.rebuild or not (normalized / "benchmark.json").exists():
-        run([sys.executable, "normalize_book_audio.py", "--audio-dir", str(audio), "--out", str(normalized)])
+    # Режим обработки меняет результат, поэтому его сверяем с прошлым прогоном: иначе на повторном
+    # запуске останется старая дорожка, и «включил фильтр» будет выглядеть как «ничего не изменилось».
+    was = None
+    report = normalized / "loudness.json"
+    if report.exists():
+        try:
+            was = (json.loads(report.read_text(encoding="utf-8")).get("polish") or {}).get("mode", "off")
+        except ValueError:
+            was = None
+    if args.rebuild or was != args.polish or not (normalized / "benchmark.json").exists():
+        if was is not None and was != args.polish and not args.rebuild:
+            print(f"обработка была «{was}», нужна «{args.polish}» — нормализую заново")
+            print("  музыка и упаковка пересоберутся из новой дорожки; если они уже посчитаны — "
+                  "запустите с --rebuild")
+        run([sys.executable, "normalize_book_audio.py", "--audio-dir", str(audio), "--out", str(normalized),
+             "--polish", args.polish])
     else:
-        print("уже нормализовано:", normalized)
+        print("уже нормализовано:", normalized, "| обработка:", was)
     print("✓ громкость выровнена")
     return normalized
 
@@ -565,6 +579,9 @@ def main():
     parser.add_argument("--voice", default=None, help="свой образец голоса вместо скачивания с GitHub")
     parser.add_argument("--highlight", choices=["sentence", "fragment"], default="sentence",
                         help="подсветка по предложениям (точнее) или по абзацам (меньше сегментов, быстрее)")
+    parser.add_argument("--polish", choices=["soft", "off"], default="soft",
+                        help="мягкая обработка готовой речи: тише свист на «с/ш/ч» и зернистость "
+                             "вокодера; громкость возвращается к цели (off — как было)")
     parser.add_argument("--upto", choices=STAGES, default="package", help="остановиться на этой стадии")
     parser.add_argument("--rebuild", action="store_true", help="пересобрать манифест/аудио, даже если готово")
     parser.add_argument("--skip-install", action="store_true", help="не ставить зависимости")
