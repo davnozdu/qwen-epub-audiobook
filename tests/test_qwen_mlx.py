@@ -30,8 +30,8 @@ class SelectionTests(unittest.TestCase):
         self.assertNotEqual(arina, sofya)
         self.assertIn("Clearly male masculine voice", q.reference_instruction(voice("gomozov", "male")))
         self.assertIn("Young girl", q.reference_instruction(voice("girl", "female", "child")))
-        with self.assertRaises(ValueError):
-            q.reference_instruction(voice("unknown", "unknown"))
+        unknown = q.reference_instruction(voice("unknown", "unknown"))
+        self.assertIn("Neutral adult voice", unknown)
 
     def test_temporary_references_deleted_on_success_error_and_interrupt(self):
         for failure in (None, RuntimeError("failed"), KeyboardInterrupt()):
