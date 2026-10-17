@@ -20,7 +20,15 @@ import zipfile
 import uuid
 from datetime import datetime, timezone
 
-from ebooklib import epub
+class _LazyEpub:
+    """EbookLib подключается при первом обращении: на --help тяжёлые зависимости не нужны."""
+
+    def __getattr__(self, name):
+        import importlib
+        return getattr(importlib.import_module("ebooklib.epub"), name)
+
+
+epub = _LazyEpub()
 
 FFMPEG = "/opt/homebrew/bin/ffmpeg"
 FFPROBE = "/opt/homebrew/bin/ffprobe"
