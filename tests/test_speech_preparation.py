@@ -82,6 +82,8 @@ class NormalizerTests(unittest.TestCase):
             "20 августа 1991 года": "Двадцатого августа тысяча девятьсот девяносто первого года",
             "к 1 сентября": "к первому сентября", "на 20 августа": "на двадцатое августа",
             "1941–1945 гг.": "тысяча девятьсот сорок первого - тысяча девятьсот сорок пятого годов.",
+            "1813-14 годов": "тысяча восемьсот тринадцатого - тысяча восемьсот четырнадцатого годов",
+            "война 1941–45 гг.": "война тысяча девятьсот сорок первого - тысяча девятьсот сорок пятого годов.",
             "Глава 3": "Глава третья", "Том II": "Том второй", "IV.": "Глава четвёртая.",
             "Пётр I": "Пётр Первый", "при Петре I": "при Петре Первом", "главы с III по V": "главы с третьей по пятую",
             "Тома I и II": "Тома первый и второй", "Читай главы III и IV": "Читай главы третью и четвёртую",
@@ -97,9 +99,19 @@ class NormalizerTests(unittest.TestCase):
                 self.assertEqual(r.normalize(expected), expected)
 
     def test_invalid_and_unsupported_formats_fail_closed(self):
-        for text in ["31.02.2024", "25:10", "Цена 1234567890123 руб.", "2024-05-03", "1/0"]:
+        for text in ["31.02.2024", "25:10", "Цена 1234567890123 руб.", "2024-05-03", "1/0", "2024-05"]:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 r.normalize(text)
+
+    def test_unsupported_number_does_not_kill_the_whole_book(self):
+        """Одно странное число не должно ронять двухчасовую книгу: в мягком режиме его показывают."""
+        pending = []
+        self.assertEqual(r.normalize("дата 2024-05-03 в тексте", strict=False, unresolved=pending),
+                         "дата 2024-05-03 в тексте")
+        self.assertEqual(pending, ["2024-05-03"])
+        with self.assertRaises(ValueError) as failure:      # строгий режим остаётся строгим
+            r.normalize("дата 2024-05-03 в тексте")
+        self.assertIn("2024-05-03", str(failure.exception))  # и называет виновника, а не молчит
 
     def test_numeric_value_and_range(self):
         self.assertEqual(r.normalize("10–15 км"), "от десяти до пятнадцати километров")

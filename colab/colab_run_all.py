@@ -464,6 +464,14 @@ def stage_stress(args, source):
          "--dictionary-dir", str(REPO / "data" / "stress"), "--llm-disputes", "off"])
 
     prepared = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
+    unresolved = (prepared.get("speech_preparation") or {}).get("unresolved_numerals") or {}
+    if unresolved:
+        # Такие числа озвучатся цифрами: книгу это не останавливает, но человеку надо знать,
+        # что именно поправить в тексте, если захочется идеального произношения.
+        warning = (f"⚠️ {len(unresolved)} сегмент(ов) с нераскрытыми числами — озвучатся цифрами: "
+                   + "; ".join(f"{seg_id}: {', '.join(tokens)}" for seg_id, tokens in list(unresolved.items())[:5]))
+        print(warning, flush=True)
+        tg(warning)
     marks = sum(len(re.findall("\u0301", s.get("tts_text", ""))) for s in prepared["segments"])
     marked = sum(1 for s in prepared["segments"] if "\u0301" in s.get("tts_text", ""))
     print(f"ударений в тексте: {marks} | сегментов с ударениями: {marked} из {len(prepared['segments'])}")

@@ -284,7 +284,13 @@ def unit_form(n, forms, case):
     return result + (" " + tail if tail else "")
 
 
-def normalize(text):
+def normalize(text, strict=True, unresolved=None):
+    """Раскрыть числа словами. strict=False — не падать на странном числе, а показать его.
+
+    Книга на два часа не должна умирать из-за одного формата, который нормализатор не знает:
+    при strict=False такое число остаётся в тексте как есть (озвучится цифрами) и попадает
+    в список `unresolved`, который конвейер печатает и кладёт в манифест для ручной проверки.
+    """
     # Keep URLs/emails/identifiers opaque rather than accidentally verbalizing them.
     protected = []
     def protect(m):
@@ -301,6 +307,17 @@ def normalize(text):
         text = re.sub(r"(?<!\w)" + re.escape(key), value, text, flags=re.I)
     text = re.sub(r"([,.!?;:…])(?=[А-Яа-яЁё])", r"\1 ", text)
     text = re.sub(r"([$€₽])\s*(\d+(?:[,.]\d+)?)", r"\2 \1", text)
+    def shortened_year(m):
+        # «1813-14», «1941-45 годов» — так пишут диапазон лет: второе число короче и продолжает первое.
+        # Разворачиваем его в полную форму («1813-1814») и отдаём обычным веткам диапазона: они уже
+        # проверены и дают живой стиль («тысяча восемьсот тринадцатого - тысяча восемьсот четырнадцатого»),
+        # а не «от одной тысячи восьмисот тринадцати». Ведущий ноль исключён намеренно: «2024-05» —
+        # это год с месяцем, и такой формат обязан остаться нераскрытым, чтобы не соврать вслух.
+        head, tail = m[1], m[3]
+        if tail.startswith("0") or len(tail) >= len(head):
+            return m[0]
+        return head + m[2] + head[:len(head) - len(tail)] + tail
+    text = re.sub(r"(?<![\w.,:/-])(\d{4})([-–—])(\d{2})(?![-–—]?\d)", shortened_year, text)
     text = date_text(text)
     text = roman_text(text)
     def time(m):
@@ -366,9 +383,15 @@ def normalize(text):
         spell = word not in RULES["wordAcronyms"] and (word in RULES["letterAcronyms"] or not any(c in "АЕЁИОУЫЭЮЯ" for c in word))
         return "-".join(letter_names[c] for c in word) if spell else word.lower()
     text = re.sub(r"(?<!\w)[А-ЯЁ]{2,8}(?!\w)", acronym, text)
-    # Do not silently mispronounce invalid formats or oversized numbers.
-    if re.search(r"\d", text):
-        raise ValueError("Нераскрытый числовой формат; требуется ручная проверка")
+    # Do not silently mispronounce invalid formats or oversized numbers — но и не ронять книгу:
+    # в мягком режиме такое число остаётся как есть и попадает в список на ручную проверку.
+    leftover = re.findall(r"\d[\w.,:/–—-]*", text)
+    if leftover:
+        if strict:
+            raise ValueError("Нераскрытый числовой формат; требуется ручная проверка: "
+                             + ", ".join(leftover[:3]))
+        if unresolved is not None:
+            unresolved.extend(leftover)
     for i, original in enumerate(protected):
         text = text.replace("\ue000" + chr(0xE100 + i) + "\ue001", original)
     return speech_punctuation(re.sub(r"[ \t]+", " ", text).strip())

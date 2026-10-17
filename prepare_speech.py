@@ -335,7 +335,7 @@ def check(manifest):
     if version not in {VERSION, "speech-preparation-5-context-check", "speech-preparation-4-context-check", "speech-preparation-3-context-check", "speech-preparation-2-check-only", "speech-preparation-1"} or info.get("input_sha256") != input_identity(manifest, version):
         raise ValueError("Подготовка речи отсутствует/устарела после изменения текста, ролей или нарезки")
     for s in manifest["segments"]:
-        normalized = ru.normalize(s["text"])
+        normalized = ru.normalize(s["text"], strict=False)
         if normalized != s.get("tts_normalized"):
             raise ValueError("Нормализация устарела: " + s["id"])
         validate_text(normalized, s.get("tts_text"), stress=False,
@@ -363,12 +363,13 @@ def process(manifest, args, out, key=None):
     stress_review = []
     batches, current, size = [], [], 0
     normalized = {}
+    unresolved = {}                                  # сегмент → числа, которые остались как есть
     dictionary_texts, dictionary_hits = {}, 0
     for s in result["segments"]:
-        try:
-            target = ru.normalize(s["text"])
-        except ValueError as exc:
-            raise ValueError(s["id"] + ": " + str(exc)) from None
+        pending = []
+        target = ru.normalize(s["text"], strict=False, unresolved=pending)
+        if pending:
+            unresolved[s["id"]] = pending
         if not target:
             raise ValueError("После нормализации фрагмент пуст: " + s["id"])
         normalized[s["id"]] = target
@@ -383,6 +384,11 @@ def process(manifest, args, out, key=None):
         size += len(target)
     if current:
         batches.append(current)
+    if unresolved:
+        # Не молчим и не роняем книгу: называем сегмент и число, чтобы это можно было поправить в тексте.
+        print(f"Нераскрытые числа: {len(unresolved)} сегмент(ов) озвучатся как есть (цифрами):", flush=True)
+        for seg_id, tokens in list(unresolved.items())[:10]:
+            print(f"   {seg_id}: {', '.join(tokens)}", flush=True)
     if dictionary:
         suffix = "неизвестные и омографы остаются без новых ударений; LLM отключена" if args.command == "offline" else "LLM проверит только готовые отметки; неизвестные и омографы остаются без новых ударений"
         print(f"Словари Supertonic: {dictionary_hits} слов изменено; {suffix}", flush=True)
@@ -423,7 +429,8 @@ def process(manifest, args, out, key=None):
         "dictionary_sha256": dictionary.sha256 if dictionary else None,
         "binary_dictionary_entries": dictionary.binary.count if dictionary and dictionary.binary else 0,
         "dictionary_words": dictionary_hits, "missing_stress_policy": "pass unchanged; no retries",
-        "names": names, "segments": len(result["segments"])}
+        "names": names, "segments": len(result["segments"]),
+        "unresolved_numerals": unresolved}
     result["speech_preparation"].update(llm_policy="disabled" if args.command == "offline" else "check only; remove uncertain non-author accents; no text rewriting",
                                          stress_review=stress_review)
     check(result)
