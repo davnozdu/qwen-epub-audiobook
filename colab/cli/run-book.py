@@ -69,10 +69,19 @@ def banner(text: str) -> None:
 
 
 # ────────────────────────────── где лежит CLI ──────────────────────────────
+def _repo_root() -> pathlib.Path:
+    """Корень репозитория: telegram_notify.py лежит там, а не рядом с обёрткой."""
+    return pathlib.Path(__file__).resolve().parent.parent.parent
+
+
 def notify_telegram(message: str) -> None:
     """Уведомление в Telegram, если задан TELEGRAM_BOT_TOKEN. Без ключа — тишина."""
     try:
         import telegram_notify
+    except ModuleNotFoundError:
+        sys.path.insert(0, str(_repo_root()))   # запускаемся из colab/cli — модуль в корне
+        import telegram_notify
+    try:
         telegram_notify.notify(message)
     except Exception:
         pass
@@ -775,6 +784,7 @@ def main() -> int:
         os.environ["TELEGRAM_BOT_TOKEN"] = args.telegram_token
     if args.telegram_chat:
         os.environ["TELEGRAM_CHAT_ID"] = args.telegram_chat
+    sys.path.insert(0, str(_repo_root()))        # telegram_notify.py лежит в корне репозитория
     try:
         import telegram_notify                                   # чат из прошлых запусков
         if not os.environ.get("TELEGRAM_CHAT_ID") and telegram_notify.saved_chat():

@@ -74,6 +74,18 @@ def notify_telegram(text_to_send: str) -> None:
     """Уведомление в Telegram, если заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. Иначе тишина."""
     try:
         import telegram_notify
+    except ModuleNotFoundError:
+        # telegram_notify.py лежит в корне репозитория, а не рядом с этим файлом; при запуске
+        # через `colab exec` __file__ вообще не определён — берём каталог клона конвейера.
+        import sys as _sys
+        candidates = [pathlib.Path(globals().get("__file__", "")).resolve().parent.parent.parent,
+                      REPO_DIR]
+        for candidate in candidates:
+            if candidate and (candidate / "telegram_notify.py").is_file():
+                _sys.path.insert(0, str(candidate))
+                break
+        import telegram_notify
+    try:
         telegram_notify.notify(text_to_send)
     except Exception:
         pass

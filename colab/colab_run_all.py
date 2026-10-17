@@ -44,6 +44,9 @@ import time
 from pathlib import Path
 
 # Уведомления в Telegram — необязательные: без ключа в окружении просто ничего не отправляется.
+# Модуль лежит в КОРНЕ репозитория, а sys.path[0] у скрипта — каталог colab/: подставляем корень.
+REPO = Path(__file__).resolve().parent.parent          # корень репозитория
+sys.path.insert(0, str(REPO))
 try:
     from telegram_notify import notify as _notify
 except Exception:                     # модуля может не быть в старой копии репозитория
@@ -58,7 +61,6 @@ def tg(text) -> None:
     except Exception:
         pass
 
-REPO = Path(__file__).resolve().parent.parent          # корень репозитория
 MODEL_REPO = "siriusfreak/qwen3-tts-12hz-1.7b-ru-stress-cf"
 MODEL_NAME = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
 MODEL_FILES = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
@@ -385,7 +387,8 @@ def stage_voices(args, source):
             shutil.copyfile(local, base_wav)
             print("взят локальный образец:", local)
         else:
-            urllib.request.urlretrieve(VOICE_URL, base_wav)
+            with urllib.request.urlopen(VOICE_URL, timeout=120) as response, base_wav.open("wb") as sink:
+                shutil.copyfileobj(response, sink, 1 << 16)
             print("образец скачан:", VOICE_URL)
 
     digest = hashlib.sha256(base_wav.read_bytes()).hexdigest()
@@ -608,12 +611,9 @@ def main():
     spent_minutes = (time.time() - started) / 60
     print(f"\nвсе стадии до «{args.upto}» пройдены за {time.time() - started:.0f} с")
     if args.upto == "package":
-        result = Path(args.out) / "project" / "result"
         tg(f"✅ Готово за {spent_minutes:.0f} мин\nкнига: {Path(args.book).name}\n"
            f"файлы: book.m4b и book-read-along.epub")
-        print("итог:", result / "book.m4b")
-    if args.upto == "package":
-        print("итог:", (source.parent / "result" / "book.m4b"))
+        print("итог:", source.parent / "result" / "book.m4b")
 
 
 if __name__ == "__main__":
