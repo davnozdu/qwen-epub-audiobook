@@ -181,8 +181,8 @@
 Что придёт в чат:
 
     🚀 Поднимаю машину Colab (T4) для «vosstavshij_iz_ada»
-    🔗 Подтвердите доступ к Google Drive: https://accounts.google.com/o/oauth2/…
-    🚀 Собралось начать · книга: vosstavshij_iz_ada.epub · машина: Tesla T4
+    🔗 Подтвердите доступ к Google Drive (под тем же аккаунтом, что и вход в Colab): https://accounts.google.com/o/oauth2/…
+    🚀 Начинаю сборку · книга: vosstavshij_iz_ada.epub · машина: Tesla T4
     ⚙️[5/12] EPUB → манифест проекта
     ...
     🎧 Озвучка: 2278 сегментов, ожидаемое время звука ≈2.7 ч

@@ -218,9 +218,58 @@ def new_view(collect: bool) -> dict:
             "prompt_at": None}
 
 
+PROPAGATE_NOTE = ("   Google отклонил авторизацию Google Drive (обычно это значит, что доступ подтвердили "
+                  "не под тем аккаунтом, под которым работает Colab CLI). Продолжаю без Google Drive: "
+                  "архив заберём локально.")
+
+
+def squelch_propagate_error(text: str, view: dict) -> str:
+    """CLI печатает «[colab] Error propagating: 400 <!DOCTYPE html>…</html>» — прячем HTML-портянку.
+
+    Google отвечает страницей 400 с разметкой; она может прийти и в нескольких кусках, поэтому
+    состояние «мы внутри html» держим в view. Человеку оставляем одну строку с сутью, в Telegram
+    уходит один раз подробное объяснение.
+    """
+    if view.get("in_html"):
+        end = text.find("</html>")
+        if end < 0:
+            return ""
+        view["in_html"] = False
+        text = text[end + len("</html>"):]
+    marker = "[colab] Error propagating"
+    if marker in text:
+        head, _, tail = text.partition(marker)
+        pos = tail.find("<!DOCTYPE html>")
+        if pos >= 0:
+            end = tail.find("</html>", pos)
+            if end < 0:
+                view["in_html"] = True
+                rest = ""
+            else:
+                rest = tail[end + len("</html>"):]
+            text = head.rstrip() + "\n" + PROPAGATE_NOTE + "\n" + rest
+        if not view.get("propagate_notified"):
+            view["propagate_notified"] = True
+            notify_telegram("⚠️ Google отклонил авторизацию Google Drive — скорее всего, доступ "
+                            "подтвердили не под тем аккаунтом Google. Сборка продолжается без выгрузки "
+                            "на Drive. В следующий раз подтверждайте по ссылке под тем же аккаунтом, "
+                            "под которым работает CLI (если в браузере несколько аккаунтов — откройте "
+                            "ссылку в окне инкогнито), либо сбросьте вход и войдите заново.")
+        return text
+    if "<!DOCTYPE html>" in text:                    # страница пришла отдельным куском после маркера
+        pos = text.find("<!DOCTYPE html>")
+        end = text.find("</html>", pos)
+        if end < 0:
+            view["in_html"] = True
+            return text[:pos]
+        text = text[:pos] + text[end + len("</html>"):]
+    return text
+
+
 def emit_output(text: str, view: dict, final: bool = False) -> None:
     """Печатаем кусок вывода шага; ссылку авторизации Drive подсвечиваем прямо в строке CLI."""
     global LAST_OUTPUT
+    text = squelch_propagate_error(text, view)
     LAST_OUTPUT = (LAST_OUTPUT + text)[-4000:]
     view["recent"] = (view["recent"] + text)[-400:]
     if re.search(r"press\s+enter", view["recent"], re.IGNORECASE) and not view["prompt_at"]:
@@ -241,7 +290,9 @@ def emit_output(text: str, view: dict, final: bool = False) -> None:
             if piece not in view["links"]:
                 view["links"].append(piece)
                 view["link_at"] = time.monotonic()
-                notify_telegram("🔗 Подтвердите доступ к Google Drive:\n" + piece)
+                notify_telegram("🔗 Подтвердите доступ к Google Drive ПОД ТЕМ ЖЕ аккаунтом Google, "
+                                "под которым работает CLI (при нескольких аккаунтах в браузере "
+                                "откройте ссылку в окне инкогнито):\n" + piece)
         else:
             sys.stdout.write(piece)                 # прочие ссылки не трогаем
     sys.stdout.flush()
@@ -264,7 +315,9 @@ def drive_mount_step(cmd, wait_seconds: float, silent_cap: float, auto_enter: bo
         state = stream_step(cmd, timeout=wait_seconds, silent_timeout=silent_cap, open_links=open_links)
         return state, False
 
-    view = new_view(sys.stdout.isatty() or open_links)
+    # Ссылки ловим всегда: в контейнере бота stdout — труба (лог tmux), иначе ссылка авторизации
+    # Drive не найдётся и не уйдёт в Telegram. Подсветка по-прежнему только в живом терминале.
+    view = new_view(True)
     pid, master = pty.fork()
     if pid == 0:                                     # ребёнок: сразу подменяем себя на CLI
         try:
@@ -363,7 +416,8 @@ def stream_step(cmd, timeout: float, silent_timeout: float | None = None, open_l
     import select
 
     decorate = sys.stdout.isatty()        # в терминале подсвечиваем, в логах — ничего лишнего
-    collect = decorate or open_links
+    # Ссылку авторизации ловим и для Telegram, даже когда вывод уходит в трубу (бот, логи).
+    collect = decorate or open_links or bool(os.environ.get("TELEGRAM_BOT_TOKEN"))
     process = subprocess.Popen([str(part) for part in cmd], env=dict(os.environ),
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     LIVE_CHILDREN.append(process)
