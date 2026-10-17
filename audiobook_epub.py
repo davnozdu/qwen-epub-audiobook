@@ -276,6 +276,8 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
     for i, segment in enumerate(manifest["segments"]):
         segment["order"] = i
     manifest["origin_book"] = original_book
+    if not manifest.get("segments"):
+        raise ValueError("Манифест без сегментов: нечего готовить и упаковывать")
     manifest["excerpt"] = {"target_seconds": seconds, "expected_seconds": duration,
         "duration_basis": "measured where available; remainder estimated at 14 characters per second" if end else ("measured first test" if timing else "estimated 14 characters per second"),
         "first_paragraph": manifest["segments"][0]["paragraph_id"], "last_paragraph": manifest["segments"][-1]["paragraph_id"]}
@@ -325,7 +327,10 @@ def package(manifest_path, audio_dir, out):
     if hashlib.sha256(source_epub.read_bytes()).hexdigest() != manifest["book"]["input_sha256"]:
         raise ValueError("Текстовый EPUB изменён после подготовки")
     actual = json.loads(subprocess.check_output([FFPROBE, "-v", "error", "-show_format", "-of", "json", str(audio_dir / "sample.wav")]))
-    if abs(float(actual["format"]["duration"]) - total) > 0.001:
+    actual_duration = (actual.get("format") or {}).get("duration")
+    if actual_duration is None:
+        raise ValueError("ffprobe не вернул длительность sample.wav — файл повреждён")
+    if abs(float(actual_duration) - total) > 0.001:
         raise ValueError("WAV и измеренная длительность не соответствуют друг другу")
     chapters = []
     for chapter_id, rows in grouped(manifest["segments"], "chapter_id").items():
@@ -346,7 +351,10 @@ def package(manifest_path, audio_dir, out):
             "-f", "ffmetadata", "-i", str(meta), "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "1",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", str(temp_m4b)], check=True)
         probe = json.loads(subprocess.check_output([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-show_chapters", "-of", "json", str(temp_m4b)]))
-        if abs(float(probe["format"]["duration"]) - total) > 0.15 or len(probe["chapters"]) != len(chapters):
+        probe_duration = (probe.get("format") or {}).get("duration")
+        if probe_duration is None:
+            raise ValueError("ffprobe не вернул длительность собранного M4B — файл повреждён")
+        if abs(float(probe_duration) - total) > 0.15 or len(probe["chapters"]) != len(chapters):
             raise ValueError("Длительность или главы M4B не соответствуют книге")
         if not any(s.get("codec_name") == "aac" for s in probe["streams"]):
             raise ValueError("M4B не содержит AAC")
