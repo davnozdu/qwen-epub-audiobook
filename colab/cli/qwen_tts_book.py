@@ -1,6 +1,6 @@
 #!/usr/bin/env -S colab run --gpu T4 --keep
 # -*- coding: utf-8 -*-
-"""EPUB → ZIP с аудиокнигой: book.m4b + book-read-along.epub в одном архиве.
+"""EPUB → ZIP с аудиокнигой: <название книги>.m4b + <название книги>-read-along.epub в одном архиве.
 
 Запуск на свежей VM Colab (одна строка, книга указывается сразу за именем файла):
 
@@ -65,6 +65,41 @@ def default_model_dir() -> pathlib.Path:
 MODEL_DIR = default_model_dir()
 RESULT_FILES = ("book.m4b", "book-read-along.epub")
 DRIVE_ROOT = pathlib.Path(os.environ.get("COLAB_DRIVE_ROOT", "/content/drive/MyDrive"))
+UNSAFE_IN_NAME = re.compile(r'[\\/:*?"<>|\x00-\x1f]+')       # запрещены в путях Windows/Finder
+
+
+def file_safe(text: str, fallback: str) -> str:
+    """Название книги → имя файла: без путей, запрещённых знаков и хвостовых точек/пробелов."""
+    name = re.sub(r"\s+", " ", text or "")
+    name = UNSAFE_IN_NAME.sub(" - ", name).strip()          # знаки-разделители в «Дюна: Книга» не склеиваются
+    name = re.sub(r"\s+", " ", name)
+    name = name.strip(" .-")[:120].strip(" .-")
+    return name or fallback
+
+
+def result_names(args, book) -> dict:
+    """Имена файлов для архива и Drive: по названию книги из EPUB, а не book.m4b.
+
+    Название берём из манифеста проекта: его пишет prepare_qwen.py из dc:title исходного epub.
+    Сначала исходный project/manifest.json — там чистое название; только если его нет, смотрим
+    подготовленный project/source/manifest.json, куда audiobook_epub.py prepare уже дописал
+    « — тестовый фрагмент». Название в частях книги (shrink_book.py) своё: «… — часть 1 из 3»,
+    поэтому архивы частей не переименовываются одинаково.
+    """
+    stem = pathlib.Path(book).stem or "book"
+    project = pathlib.Path(args.out) / "project"
+    title = ""
+    for candidate in (project / "manifest.json", project / "source" / "manifest.json"):
+        try:
+            title = (json.loads(candidate.read_text(encoding="utf-8")).get("book") or {}).get("title", "")
+        except (OSError, ValueError):
+            title = ""
+        if title:
+            break
+    if not title:
+        print(f"названия книги в манифесте нет — беру имя файла: {stem}")
+    base = file_safe(title, stem)
+    return {RESULT_FILES[0]: f"{base}.m4b", RESULT_FILES[1]: f"{base}-read-along.epub"}
 
 
 def banner(text):
@@ -318,11 +353,14 @@ def pack(args, book):
     missing = [name for name in RESULT_FILES if not (result / name).is_file()]
     assert not missing, f"в {result} нет файлов: {missing}"
 
+    # Файлы на диске остаются book.m4b / book-read-along.epub (их пишет audiobook_epub.py package),
+    # а наружу — в архив и на Drive — уходят под названием книги из EPUB.
+    names = result_names(args, book)
     archive = pathlib.Path(args.zip)
     archive.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
         for name in RESULT_FILES:
-            zf.write(result / name, arcname=name)
+            zf.write(result / name, arcname=names[name])
 
     # Хеш считаем потоком: read_bytes() по архиву в сотни МБ мог выбить память на машине.
     hasher = hashlib.sha256()
@@ -347,9 +385,7 @@ def pack(args, book):
         print("  затем повторить задание, либо забрать архив вручную: colab download ...")
     else:
         stem = pathlib.Path(book).stem
-        book_dir = DRIVE_ROOT / args.drive_dir / stem       # папка называется по имени книги
-        names = {RESULT_FILES[0]: f"{stem}.m4b",
-                 RESULT_FILES[1]: f"{stem}-read-along.epub"}
+        book_dir = DRIVE_ROOT / args.drive_dir / stem       # папка называется по имени файла книги
         try:
             book_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

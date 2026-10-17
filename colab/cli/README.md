@@ -25,7 +25,10 @@
 музыка → упаковка), заберёт готовый архив в папку загрузок (`~/Downloads`, на Windows
 `%USERPROFILE%\Downloads\<книга>.zip`) и освободит машину.
 
-В архиве ровно два файла: `book.m4b` (аудиокнига) и `book-read-along.epub` (текст с подсветкой).
+В архиве ровно два файла, и оба названы по книге из epub: `<название книги>.m4b` (аудиокнига) и
+`<название книги>-read-along.epub` (текст с подсветкой). Название берётся из манифеста — то самое
+`dc:title`, что записано в метаданные самой аудиокниги. Файлы внутри проекта на машине остаются
+`book.m4b` / `book-read-along.epub`, переименование происходит только при упаковке.
 
 ## Настройки (переменными перед командой)
 
@@ -36,7 +39,7 @@
 | `FRAGMENT=300` | озвучить только 300 секунд вместо всей книги |
 | `HIGHLIGHT=fragment` | подсветка по абзацам: сегментов меньше, синтез быстрее |
 | `KEEP_SESSION=1` | не гасить машину в конце: следующая книга пойдёт без установки пакетов и загрузки весов |
-| `DRIVE=1` | подключить Google Drive и положить `book.m4b` и read-along epub в `MyDrive/Audiobooks-colab/<имя книги>` (по умолчанию 1; `DRIVE=0` — не подключать) |
+| `DRIVE=1` | подключить Google Drive и положить m4b и read-along epub (названные по книге) в `MyDrive/Audiobooks-colab/<имя книги>` (по умолчанию 1; `DRIVE=0` — не подключать) |
 | `DRIVE_DIR=...` | другая папка внутри `MyDrive` (по умолчанию `Audiobooks-colab`) |
 | `DRIVE_WAIT=60` | сколько секунд ждать подтверждения Drive, потом продолжить без него |
 | `AUTO_OPEN=1` | открывать браузер со ссылкой авторизации (по умолчанию выключено: ссылка просто подсвечивается, скрипт годится для автоматизации) |
@@ -124,13 +127,14 @@
 
 | что произошло | куда попадёт результат |
 |---|---|
-| Drive подключён | `MyDrive/Audiobooks-colab/<имя книги>/` — `book.m4b` и read-along epub **под именем книги**, и zip в `~/Downloads` |
+| Drive подключён | `MyDrive/Audiobooks-colab/<имя книги>/` — файлы **под названием книги из epub** (`<название книги>.m4b` и `<название книги>-read-along.epub`), и zip в `~/Downloads` |
 | нажали Enter без подтверждения доступа | Drive пропускаем, zip в `~/Downloads` (книга не теряется) |
 | за 120 секунд никто не ответил | попытку снимаем, Drive пропускаем, zip в `~/Downloads` |
 | `colab drivemount` упал | Drive пропускаем, zip в `~/Downloads` |
 
-Имя книги берётся из epub: файл `idiot-part1.epub` ляжет как
-`Audiobooks-colab/idiot-part1/idiot-part1.m4b` и `Audiobooks-colab/idiot-part1/idiot-part1-read-along.epub`.
+Папка называется по имени файла книги, а файлы внутри — по названию книги из epub: `idiot-part1.epub`
+(название в epub «Идиот — часть 1 из 3») ляжет как `Audiobooks-colab/idiot-part1/` с файлами
+`Идиот — часть 1 из 3.m4b` и `Идиот — часть 1 из 3-read-along.epub`. В архиве — те же два имени.
 
 Подключить вручную (например, к уже запущенной машине) и положить файлы на Drive без обёртки:
 
@@ -222,8 +226,8 @@
     📂 Книга на Google Drive
     папка «Audiobooks-colab/vosstavshij_iz_ada»:
     https://drive.google.com/drive/folders/1AbC…
-    • vosstavshij_iz_ada.m4b: https://drive.google.com/file/d/1M4b…/view
-    • vosstavshij_iz_ada-read-along.epub: https://drive.google.com/file/d/1Epub…/view
+    • Восставший из ада.m4b: https://drive.google.com/file/d/1M4b…/view
+    • Восставший из ада-read-along.epub: https://drive.google.com/file/d/1Epub…/view
 
 Ссылки строятся по идентификаторам Drive, которые drivefs держит в атрибуте `user.drive.id`
 смонтированного файла. Если атрибута нет (старое ядро или другой монтировщик), вместо прямой
