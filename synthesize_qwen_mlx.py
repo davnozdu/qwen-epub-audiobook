@@ -43,12 +43,13 @@ VOICE_STYLES = {
 
 def reference_instruction(voice):
     gender = voice.get("voice_gender", voice.get("gender"))
-    if gender not in {"male", "female"}:
-        raise ValueError(f"Укажите пол голоса для роли {voice['id']}")
+    unknown = gender not in {"male", "female"}
     age = str(voice.get("age", "unknown")).lower()
     child = any(word in age for word in ("child", "boy", "girl", "реб", "мальчик", "девочка"))
-    casting = ("Young girl, feminine child voice." if gender == "female" else "Young boy, masculine child voice.") if child else (
-        "Clearly female feminine voice." if gender == "female" else "Clearly male masculine voice.")
+    casting = (("Young girl, feminine child voice." if gender == "female" else "Young boy, masculine child voice.") if child
+               else ("Clearly female feminine voice." if gender == "female" else "Clearly male masculine voice."))
+    if unknown:
+        casting = "Neutral adult voice."       # пол роли не задан — образец всё равно нужен
     style = VOICE_STYLES.get(voice["id"], voice["voice_description"])
     return casting + " " + style + " Speak natural Russian with clear intelligible diction. Keep a single consistent speaker. Read every word exactly. No singing, laughter, whispers, sound effects or exaggerated acting."
 
@@ -372,7 +373,11 @@ def _render(args, temporary_library=None):
             raise ValueError("Для клонирования нужен аудиокодек с encoder")
         print(f"Model ready: {device_info.get('device_name', 'Metal GPU')}; load {load_seconds:.2f}s", flush=True)
         warmup_started = time.perf_counter()
-        first_voice = voices[candidates[0]["speaker"]]
+        speaker = candidates[0].get("speaker")
+        if speaker not in voices:
+            raise ValueError(f"У первого сегмента не определён голос ({speaker!r}) — "
+                             f"разметьте роли и повторите запуск")
+        first_voice = voices[speaker]
         if not getattr(args, "rab_generation", False):
             generate_audio(model, mx, "Это короткая проверка звука.", first_voice["instruct"], first_voice["seed"], args,
                            reference=references[first_voice["id"]] if cloning else None)
@@ -444,7 +449,7 @@ def _render(args, temporary_library=None):
                 total_samples += pause
         mp3 = out / "sample.mp3"
         # Portable preview; no tempo changes or loudness processing that hides defects.
-        subprocess.run(["/opt/homebrew/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(combined),
+        subprocess.run([shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(combined),
                         "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3)], check=True)
         synthesis_seconds = sum(r["synthesis_seconds"] for r in rows)
         raw_seconds = sum(r["raw_audio_seconds"] for r in rows)

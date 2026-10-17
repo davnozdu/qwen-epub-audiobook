@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
-FFMPEG = '/opt/homebrew/bin/ffmpeg'
+FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 FIRST_TRACK = {'file': 'Lamplight_and_Paper.mp3', 'title': 'Свет лампы и страницы',
                'size': 4247943, 'sha256': 'f1048274fd167a826b18b94f52782d89848606e21719deb835e5bde75e42bba2'}
 

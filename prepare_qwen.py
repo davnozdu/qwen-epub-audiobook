@@ -54,7 +54,10 @@ def read_source(path):
     paragraphs, chapters = [], []
     with zipfile.ZipFile(path) as archive:
         container = ET.fromstring(archive.read("META-INF/container.xml"))
-        opf_name = next(e.attrib["full-path"] for e in container.iter() if e.tag.endswith("}rootfile"))
+        opf_name = next((e.attrib["full-path"] for e in container.iter()
+                         if e.tag.endswith("}rootfile")), None)
+        if not opf_name:
+            raise ValueError(f"{path.name}: в container.xml нет корневого файла — это не EPUB")
         opf = ET.fromstring(archive.read(opf_name))
         title = next((e.text for e in opf.iter() if e.tag.endswith("}title") and e.text), Path(path).stem)
         author = next((e.text for e in opf.iter() if e.tag.endswith("}creator") and e.text), "")

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
+FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
 
 def measure(path):

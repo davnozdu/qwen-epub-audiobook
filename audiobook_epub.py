@@ -30,8 +30,8 @@ class _LazyEpub:
 
 epub = _LazyEpub()
 
-FFMPEG = "/opt/homebrew/bin/ffmpeg"
-FFPROBE = "/opt/homebrew/bin/ffprobe"
+FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+FFPROBE = shutil.which("ffprobe") or "/opt/homebrew/bin/ffprobe"
 SMIL = "http://www.w3.org/ns/SMIL"
 XHTML = "http://www.w3.org/1999/xhtml"
 EPUB = "http://www.idpf.org/2007/ops"

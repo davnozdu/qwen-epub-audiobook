@@ -482,7 +482,7 @@ def main():
         if pending.exists():
             pending.unlink()
         print(json.dumps({k: v for k, v in result["speech_preparation"].items() if k != "names"}, ensure_ascii=False))
-    except (ValueError, OSError, KeyError, TypeError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, EOFError) as exc:
         parser.exit(1, f"Ошибка подготовки речи: {exc}\n")
 
 
