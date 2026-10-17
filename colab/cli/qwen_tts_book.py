@@ -35,6 +35,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -277,12 +278,19 @@ def run_pipeline(args, runner, book):
                          f"{process.returncode}\nпоследние строки:\n{''.join(tail)}")
 
 
+DRIVE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{20,}$")
+
+
 def drive_link(path) -> str:
     """Ссылка на файл или папку в Google Drive.
 
     На смонтированном диске drivefs держит идентификатор объекта в расширенном атрибуте
     user.drive.id — по нему и собираем прямую ссылку. Если атрибута нет (старое ядро, другой
     монтировщик), возвращаем поиск по имени: он всё равно открывает нужную папку.
+
+    Идентификатор проверяем на вид: у только что созданной папки drivefs отдаёт ВРЕМЕННУЮ
+    пометку вроде «local-105», и ссылка по ней не открывается («ничего не происходит»).
+    Такую пометку считаем отсутствием идентификатора.
     """
     path = pathlib.Path(path)
     file_id = ""
@@ -298,7 +306,7 @@ def drive_link(path) -> str:
             file_id = ""
     except Exception:
         file_id = ""
-    if file_id:
+    if file_id and DRIVE_ID_RE.match(file_id):
         if path.is_dir():
             return f"https://drive.google.com/drive/folders/{file_id}"
         return f"https://drive.google.com/file/d/{file_id}/view"
