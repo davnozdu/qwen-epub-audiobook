@@ -386,7 +386,11 @@ def _render(args, temporary_library=None):
         duration = 0.0
         fresh = 0
         sample_rate = None
-        for s in candidates:
+        # Счётчик для прогресса: по нему бот и страница считают проценты и оценку остатка,
+        # поэтому формат строки фиксированный («сегмент 412/1496 ...») и печатается на каждом
+        # сегменте, включая взятые из кэша: иначе после продолжения прогона прогресс бы замер.
+        total = len(candidates)
+        for index, s in enumerate(candidates, 1):
             if s["speaker"] is None or s["speaker"] not in voices:
                 raise ValueError(f"Нельзя озвучить неопределённую роль {s['id']}")
             voice = voices[s["speaker"]]
@@ -429,7 +433,7 @@ def _render(args, temporary_library=None):
             duration += pause_samples / sr
             rows.append(dict(metrics, segment_id=s["id"], speaker=s["speaker"], cached=cached))
             save(out / "progress.json", {"state": "generating", "audio_seconds": duration, "segments": len(rows), "last_segment": s["id"]})
-            print(f"{s['id']} {voice['name']}: {metrics['audio_seconds']:.1f}s audio / {metrics['synthesis_seconds']:.1f}s generation; sample {duration:.1f}s", flush=True)
+            print(f"сегмент {index}/{total} · {s['id']} {voice['name']}: {metrics['audio_seconds']:.1f}s audio / {metrics['synthesis_seconds']:.1f}s generation; sample {duration:.1f}s", flush=True)
             if not args.whole_book and duration >= args.seconds:
                 break
         if not timeline:
