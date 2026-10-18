@@ -41,6 +41,51 @@ def args(mode="offline", size=2400):
 
 
 class NormalizerTests(unittest.TestCase):
+
+    def test_dashes_never_reach_the_model(self):
+        """Тире из текста для модели убираются, а текст книги остаётся как написан.
+
+        Модель спотыкается на тире: «Смерть – высокая особа». В русской речи тире не
+        произносится, это знак паузы, и паузу дают запятая и точка. Поэтому в копии для
+        синтеза тире нет, а отображаемый текст книги не меняется никогда.
+        """
+        self.assertEqual(r.normalize("Смерть – высокая особа.", strict=False), "Смерть высокая особа.")
+        self.assertEqual(r.normalize("руке, – поза напряженная.", strict=False), "руке, поза напряженная.")
+        self.assertEqual(r.normalize("– Да, – сказал он. — Нет.", strict=False), "Да, сказал он. Нет.")
+        # Дефис внутри слова — часть слова, его не трогаем; тире внутри слова становится дефисом.
+        # Дефисные слова склеиваются в одно слово: модель читает их без запинки посреди слова.
+        self.assertEqual(r.normalize("Солдат-пехотинец по–моему.", strict=False), "Солдатпехотинец помоему.")
+        self.assertEqual(r.normalize("как-будто как-нибудь", strict=False), "какбудто какнибудь")
+        # А даты и диапазоны — это числа, их дефис остаётся.
+        self.assertEqual(r.speech_punctuation("дата 2024-05-03 в тексте"), "дата 2024-05-03 в тексте")
+        # Диапазон чисел — это не пауза: дефис остаётся.
+        self.assertEqual(r.speech_punctuation("страницы 5–10"), "страницы 5-10")
+        # Проверка подготовки речи на таком тексте проходит: слова и границы предложений целы.
+        original = r.normalize("Смерть – высокая особа, и это заметно.", strict=False)
+        p.validate_text(original, original)
+
+    def test_displayed_book_text_keeps_its_dashes(self):
+        """Правка касается только копии для модели: в книге и в разметке тире остаются."""
+        text = "Смерть – высокая особа."
+        source = {"title": "Тест", "author": "", "input_sha256": "hash", "normalization": "test",
+                  "paragraphs": [{"id": "p1", "chapter_id": "ch001", "text": text,
+                                  "source": {"href": "a.xhtml", "block_index": 0, "element_id": None, "tag": "p"}}],
+                  "chapters": [{"id": "ch001", "href": "a.xhtml", "title": "Глава"}]}
+        from types import SimpleNamespace
+        import prepare_qwen as pq
+        labels = [{"id": "p1", "spans": [{"start": 0, "end": len(text), "speaker": "narrator",
+                                         "confidence": "high", "reason": ""}]}]
+        args = SimpleNamespace(target_chars=220, max_chars=260, min_chars=100, model="test", no_think=False)
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            pq.export_project(out, source, {"characters": [
+                {"id": "narrator", "name": "Автор", "gender": "male", "age": "adult", "aliases": [],
+                 "evidence": "Повествование", "voice_description": "Calm adult male baritone."}]},
+                labels, args)
+            manifest = pq.load(out / "manifest.json")
+        self.assertEqual(manifest["segments"][0]["text"], text)          # в разметке тире на месте
+        self.assertNotIn("–", r.normalize(manifest["segments"][0]["text"], strict=False))
+
     def test_binary_dictionary_utf8_lookup_and_close(self):
         import struct
         from stress_dictionary import BinaryAccentDictionary
@@ -78,12 +123,12 @@ class NormalizerTests(unittest.TestCase):
             "$100": "сто долларов", "3 мая": "Третьего мая", "1/3": "одна третья", "3,14": "три целых четырнадцать сотых",
             "2 км 5 кг 1%": "два километра пять килограммов один процент",
             "+7 (912) 345-67-89": "плюс семь девятьсот двенадцать триста сорок пять шестьдесят семь восемьдесят девять",
-            "т.е. ФСБ": "то есть эф-эс-бэ", "зелё-\nный лес [1]": "зелёный лес",
+            "т.е. ФСБ": "то есть эф эс бэ", "зелё-\nный лес [1]": "зелёный лес",
             "20 августа 1991 года": "Двадцатого августа тысяча девятьсот девяносто первого года",
             "к 1 сентября": "к первому сентября", "на 20 августа": "на двадцатое августа",
-            "1941–1945 гг.": "тысяча девятьсот сорок первого - тысяча девятьсот сорок пятого годов.",
-            "1813-14 годов": "тысяча восемьсот тринадцатого - тысяча восемьсот четырнадцатого годов",
-            "война 1941–45 гг.": "война тысяча девятьсот сорок первого - тысяча девятьсот сорок пятого годов.",
+            "1941–1945 гг.": "тысяча девятьсот сорок первого тысяча девятьсот сорок пятого годов.",
+            "1813-14 годов": "тысяча восемьсот тринадцатого тысяча восемьсот четырнадцатого годов",
+            "война 1941–45 гг.": "война тысяча девятьсот сорок первого тысяча девятьсот сорок пятого годов.",
             "Глава 3": "Глава третья", "Том II": "Том второй", "IV.": "Глава четвёртая.",
             "Пётр I": "Пётр Первый", "при Петре I": "при Петре Первом", "главы с III по V": "главы с третьей по пятую",
             "Тома I и II": "Тома первый и второй", "Читай главы III и IV": "Читай главы третью и четвёртую",
@@ -162,14 +207,16 @@ class StressTests(unittest.TestCase):
             self.assertTrue(p.check(result))
             self.assertEqual(result["speech_preparation"]["dictionary_words"], 2)
 
-    def test_qwen_dashes_are_short_and_epub_text_is_unchanged(self):
+    def test_dashes_are_removed_for_speech_and_epub_text_is_unchanged(self):
         original = manifest()
         original["segments"][0]["text"] = "— Арина – девушка."
         with tempfile.TemporaryDirectory() as temp:
             result = p.process(original, args(), Path(temp))
         self.assertEqual(result["segments"][0]["text"], "— Арина – девушка.")
-        self.assertEqual(result["segments"][0]["tts_text"], "- Арина - девушка.")
-        self.assertEqual(r.speech_punctuation("—–‐‑‒−"), "------")
+        self.assertEqual(result["segments"][0]["tts_text"], "Арина девушка.")
+        # Универсально: тире для модели не остаётся ни одного, в любом начертании.
+        self.assertEqual(r.speech_punctuation("—–‐‑‒−"), "")
+        self.assertEqual(r.speech_punctuation("«— О, ещё бы!»"), "«О, ещё бы!»")
 
     def test_unstressed_bezo_is_valid_but_real_omissions_are_rejected(self):
         text = "Безо всяких причин."

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 
-VERSION = "supertonic-python-2"
+VERSION = "supertonic-python-3"   # 3: тире убраны из текста для синтеза, дефисные слова склеены
 RULES = json.loads(Path(__file__).with_name("supertonic_rules.json").read_text(encoding="utf-8"))
 FORMS = {row[0]: row for row in RULES["forms"]}
 ROOTS = {int(n): root for n, root in RULES["ordinal_roots"].items()}
@@ -381,7 +381,9 @@ def normalize(text, strict=True, unresolved=None):
     def acronym(m):
         word = m[0]
         spell = word not in RULES["wordAcronyms"] and (word in RULES["letterAcronyms"] or not any(c in "АЕЁИОУЫЭЮЯ" for c in word))
-        return "-".join(letter_names[c] for c in word) if spell else word.lower()
+        # Буквы называем по отдельности: пробел между ними читается как перечисление букв,
+        # а дефис в озвучке мешает так же, как тире.
+        return " ".join(letter_names[c] for c in word) if spell else word.lower()
     text = re.sub(r"(?<!\w)[А-ЯЁ]{2,8}(?!\w)", acronym, text)
     # Do not silently mispronounce invalid formats or oversized numbers — но и не ронять книгу:
     # в мягком режиме такое число остаётся как есть и попадает в список на ручную проверку.
@@ -397,6 +399,29 @@ def normalize(text, strict=True, unresolved=None):
     return speech_punctuation(re.sub(r"[ \t]+", " ", text).strip())
 
 
+# Тире во всех начертаниях. Дефис-минус в этот список не входит: он внутри слов.
+DASHES = "—–―‐‑‒⁃−﹣－"
+
+
 def speech_punctuation(text):
-    """Canonical short dash for Qwen, never applied to displayed EPUB text."""
-    return text.translate(str.maketrans({c: "-" for c in "—–‐‑‒⁃−﹣－"}))
+    """Текст для модели: тире убираем, дефисные слова склеиваем.
+
+    Тире — это разметка для чтения, а не речь. В озвучке они мешают всегда: и длинные, и
+    короткие. «Смерть – высокая особа» звучит с призвуком, реплика с тире в начале строки
+    рвётся. Поэтому тире уходит совсем — паузу и так дают запятая, точка и конец абзаца.
+    Слова, которые пишутся через дефис («как-будто», «как-нибудь», «по-моему»), склеиваем в
+    одно слово: так модель читает их без запинки посреди слова. Диапазон чисел не трогаем:
+    «5–10» — это не пауза, а число.
+    Отображаемый текст книги не меняется никогда: правим только копию для синтеза.
+    """
+    text = re.sub(rf"(?<=\d)\s*[{DASHES}-]+\s*(?=\d)", "-", text)     # 5–10: диапазон, а не пауза
+    # Склеиваем только буквы: «как-будто» → «какбудто». Дефис между цифрами (дата, диапазон)
+    # не трогаем — это число, а не знак паузы.
+    text = re.sub(rf"(?<=[^\W\d_])[{DASHES}-]+(?=[^\W\d_])", "", text)
+    opening = "«„\"'(\\[<"
+    # Реплика внутри кавычек: «— О, ещё бы!» — тире убираем вместе с его пробелом, иначе
+    # останется « О», и модель прочтёт лишнюю паузу.
+    text = re.sub(rf"(?<=[{opening}])[{DASHES}-]+\s+", "", text)
+    text = re.sub(rf"(?:(?<=\s)|^)[{DASHES}-]+(?=\s|$)", "", text)                 # тире — вон
+    text = re.sub(rf"(?<=\w)[{DASHES}-]+(?=\s|$)", "", text)           # «слово– другое» — тоже тире
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
