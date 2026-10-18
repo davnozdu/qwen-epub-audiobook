@@ -317,8 +317,12 @@ def run_step(title: str, command: list) -> None:
         raise SystemExit(f"шаг «{title}» упал с кодом {process.returncode}")
 
 
-def pack_result(result, out, base: str) -> pathlib.Path:
-    """Архив как у машины: файлы названы книгой, лежат рядом с остальными готовыми книгами."""
+def pack_result(result, out, base: str, title: str) -> pathlib.Path:
+    """Архив как у машины: имя — как у книги на диске, файлы внутри названы книгой.
+
+    Имя архива специально без пробелов и как имя файла книги (stem): по абсолютному пути в журнале
+    бот понимает, что архив готов. Название книги с пробелами внутри архива — а не в его имени.
+    """
     result = pathlib.Path(result)
     missing = [name for name in RESULT_FILES if not (result / name).is_file()]
     if missing:
@@ -327,8 +331,8 @@ def pack_result(result, out, base: str) -> pathlib.Path:
     out.mkdir(parents=True, exist_ok=True)
     archive = out / f"{base}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(result / "book.m4b", arcname=f"{base}.m4b")
-        zf.write(result / "book-read-along.epub", arcname=f"{base}-read-along.epub")
+        zf.write(result / "book.m4b", arcname=f"{title}.m4b")
+        zf.write(result / "book-read-along.epub", arcname=f"{title}-read-along.epub")
     digest = hashlib.sha256()
     with archive.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
@@ -365,7 +369,7 @@ def rewrite_paths(part) -> dict:
 
 # ───────────────────────────────── режимы ─────────────────────────────────
 
-def mode_part(parts: list, work, out) -> int:
+def mode_part(parts: list, work, out, name: str = "") -> int:
     """Часть как самостоятельная книга: сырьё как есть — без громкости, фильтра и музыки."""
     if len(parts) != 1:
         raise SystemExit("--part требует ровно одну часть: передайте --parts-dir с part-<k>")
@@ -375,20 +379,20 @@ def mode_part(parts: list, work, out) -> int:
     raw = work / "part-raw"
     raw.mkdir(parents=True, exist_ok=True)
     banner(f"Часть {part['index']}: дорожка из сырья")
-    for name in ("timeline.json", "benchmark.json"):
-        shutil.copyfile(raw_audio(part) / name, raw / name)
+    for name_file in ("timeline.json", "benchmark.json"):
+        shutil.copyfile(raw_audio(part) / name_file, raw / name_file)
     build_sample(raw_audio(part), raw / "sample.wav", total)
     banner(f"Часть {part['index']}: сборка книги части")
     run_step(f"Часть {part['index']}: m4b и read-along",
              [sys.executable, REPO / "audiobook_epub.py", "package", "--manifest", part["source"],
               "--audio-dir", raw, "--out", work / "result"])
-    base = file_safe(prepared["book"]["title"], f"часть {part['index']}")
-    archive = pack_result(work / "result", out, base)
+    archive = pack_result(work / "result", out, name or f"часть-{part['index']}",
+                          prepared["book"]["title"])
     print(f"\nготова часть {part['index']}: {archive.name} ({total / 60:.0f} мин звука)")
     return 0
 
 
-def mode_final(parts: list, work, out, book, polish: str) -> int:
+def mode_final(parts: list, work, out, book, polish: str, name: str = "") -> int:
     """Финал: склейка частей, один прогон громкости и музыки на всю книгу, сборка."""
     banner(f"Финал: склеиваю {len(parts)} части в одну книгу")
     meta = book_meta(book)
@@ -435,8 +439,8 @@ def mode_final(parts: list, work, out, book, polish: str) -> int:
              [sys.executable, REPO / "audiobook_epub.py", "package",
               "--manifest", prepared_dir / "source" / "manifest.json", "--audio-dir", music,
               "--out", work / "result"])
-    base = file_safe(whole["book"]["title"], "книга")
-    archive = pack_result(work / "result", out, base)
+    base = name or (pathlib.Path(book).stem if book else "") or file_safe(whole["book"]["title"], "книга")
+    archive = pack_result(work / "result", out, base, whole["book"]["title"])
     save(pathlib.Path(parts[0]["folder"]).parent / "glue.json",
          {"book": str(book), "title": whole["book"]["title"], "parts": len(parts),
           "segments": count, "seconds": total, "polish": polish, "archive": archive.name,
@@ -459,6 +463,7 @@ def main() -> int:
                         help="мягкая обработка речи при выравнивании (off — только громкость)")
     parser.add_argument("--work", default="", help="рабочий каталог сборки (по умолчанию в --parts-dir)")
     parser.add_argument("--expect", type=int, default=0, help="сколько частей ждём")
+    parser.add_argument("--name", default="", help="имя архива без пробелов (обычно имя файла книги)")
     args = parser.parse_args()
 
     banner("Параметры сборки")
@@ -471,8 +476,9 @@ def main() -> int:
         wanted = [item for item in check_parts(parts_dir, 0) if not args.part or item["index"] == args.part]
         if not wanted:
             raise SystemExit(f"части {args.part} нет в {parts_dir}")
-        return mode_part(wanted, work, args.out)
-    return mode_final(check_parts(parts_dir, args.expect), work, args.out, args.book, args.polish)
+        return mode_part(wanted, work, args.out, args.name)
+    return mode_final(check_parts(parts_dir, args.expect), work, args.out, args.book, args.polish,
+                      args.name)
 
 
 if __name__ == "__main__":

@@ -141,9 +141,9 @@ class GlueTests(unittest.TestCase):
         with parts_book() as (root, book, seconds):
             out = WORK / "results"
             done = glue("--mode", "final", "--parts-dir", root, "--book", book, "--out", out,
-                        "--work", WORK / "glue", "--expect", 2)
+                        "--work", WORK / "glue", "--expect", 2, "--name", "kniga")
             self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
-            archive = out / "Книга целиком.zip"
+            archive = out / "kniga.zip"
             self.assertTrue(archive.is_file(), list(out.iterdir()))
             with zipfile.ZipFile(archive) as zf:
                 names = sorted(zf.namelist())
@@ -176,9 +176,9 @@ class GlueTests(unittest.TestCase):
         with parts_book() as (root, book, seconds):
             out = WORK / "results-part"
             done = glue("--mode", "part", "--part", 2, "--parts-dir", root, "--out", out,
-                        "--work", WORK / "glue-part")
+                        "--work", WORK / "glue-part", "--name", "chast-2")
             self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
-            archive = out / "Книга целиком — часть 2 из 2.zip"
+            archive = out / "chast-2.zip"
             self.assertTrue(archive.is_file(), list(out.iterdir()))
             with zipfile.ZipFile(archive) as zf:
                 self.assertIn("Книга целиком — часть 2 из 2-read-along.epub", zf.namelist())

@@ -830,7 +830,8 @@ def fetch_raw(colab, args, stem) -> int:
         print(f"нет сборщика частей {glue} — сырьё лежит в {part}, часть не собрана")
         return 1
     command = [sys.executable, str(glue), "--mode", "part", "--part", str(args.part_index),
-               "--parts-dir", str(parts_dir), "--out", str(args.out_dir or downloads_dir())]
+               "--parts-dir", str(parts_dir), "--out", str(args.out_dir or downloads_dir()),
+               "--name", stem]
     print("== собираю часть в образе ==\n  " + " ".join(command), flush=True)
     code = subprocess.run(command, cwd=str(glue.parent)).returncode
     if code != 0:
