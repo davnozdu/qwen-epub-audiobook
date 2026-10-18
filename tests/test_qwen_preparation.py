@@ -1,4 +1,5 @@
 import json
+import pathlib
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -81,6 +82,96 @@ class PreparationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             list(q.split_text("а" * 500, 100, 130))
 
+    def test_short_pieces_are_glued_to_the_same_voice_and_never_mix_voices(self):
+        """Короткие куски одного голоса склеиваются — и внутри абзаца, и через целые абзацы.
+
+        Реплики по одному-два слова модель в одиночку рвёт; их надо отдавать одной порцией.
+        Чужие голоса не смешиваются никогда: сегмент озвучивается одним голосом, и склейка
+        разных голосов сломала бы и звук, и разметку.
+        """
+        long_narrator = "Дальше идёт длинная реплика рассказчика, которую резать незачем. " * 6
+        source = {"title": "Тест", "author": "", "input_sha256": "hash", "normalization": "test",
+                  "paragraphs": [
+                      {"id": "p1", "chapter_id": "ch001", "text": "— Да.",
+                       "source": {"href": "a.xhtml", "block_index": 0, "element_id": None, "tag": "p"}},
+                      {"id": "p2", "chapter_id": "ch001", "text": "— Нет.",
+                       "source": {"href": "a.xhtml", "block_index": 1, "element_id": None, "tag": "p"}},
+                      {"id": "p3", "chapter_id": "ch001", "text": "— Не знаю.",
+                       "source": {"href": "a.xhtml", "block_index": 2, "element_id": None, "tag": "p"}},
+                      {"id": "p4", "chapter_id": "ch001", "text": long_narrator,
+                       "source": {"href": "a.xhtml", "block_index": 3, "element_id": None, "tag": "p"}}],
+                  "chapters": [{"id": "ch001", "href": "a.xhtml", "title": "Глава"}]}
+        labels = [{"id": p["id"], "spans": [{"start": 0, "end": len(p["text"]), "speaker": "narrator",
+                                            "confidence": "high", "reason": ""}]}
+                  for p in source["paragraphs"]]
+        args = SimpleNamespace(target_chars=220, max_chars=360, min_chars=80, model="test", no_think=False)
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            q.export_project(out, source, cast(), labels, args)
+            manifest = q.load(out / "manifest.json")
+            q.check_manifest(manifest, source)
+            segments = manifest["segments"]
+        # Три коротких абзаца подряд ушли одной порцией вместе с началом длинного абзаца:
+        # короткий кусок модель в одиночку рвёт, поэтому к нему дописан сосед того же голоса.
+        self.assertGreaterEqual(len(segments), 2, [s["text"] for s in segments])
+        self.assertTrue(segments[0]["text"].startswith("— Да. — Нет. — Не знаю."), segments[0]["text"])
+        self.assertEqual([piece["paragraph_id"] for piece in segments[0]["sources"]], ["p1", "p2", "p3", "p4"])
+        self.assertEqual([piece["text"] for piece in segments[0]["sources"]][:3],
+                         ["— Да.", "— Нет.", "— Не знаю."])
+        self.assertEqual([s["order"] for s in segments], list(range(len(segments))))
+        # Потолка не превышаем: сегмент не длиннее максимума, иначе модель начнёт сбиваться.
+        self.assertTrue(all(len(s["text"]) <= 360 for s in segments), [len(s["text"]) for s in segments])
+        # Ни одна строка книги не потеряна и порядок не изменён.
+        self.assertEqual(" ".join(s["text"] for s in segments),
+                         " ".join(p["text"] for p in source["paragraphs"]).strip())
+
+    def test_short_tail_inside_one_paragraph_is_glued_to_its_neighbour(self):
+        """Короткий хвост абзаца приклеивается к предыдущему куску, а не идёт отдельной порцией."""
+        text = "Тихая улица, и никого. " * 20 + "И всё."
+        source = {"title": "Тест", "author": "", "input_sha256": "hash", "normalization": "test",
+                  "paragraphs": [{"id": "p1", "chapter_id": "ch001", "text": text.strip(),
+                                  "source": {"href": "a.xhtml", "block_index": 0, "element_id": None, "tag": "p"}}],
+                  "chapters": [{"id": "ch001", "href": "a.xhtml", "title": "Глава"}]}
+        labels = [{"id": "p1", "spans": [{"start": 0, "end": len(text.strip()), "speaker": "narrator",
+                                         "confidence": "high", "reason": ""}]}]
+        args = SimpleNamespace(target_chars=220, max_chars=360, min_chars=80, model="test", no_think=False)
+        with tempfile.TemporaryDirectory() as folder:
+            out = Path(folder)
+            q.export_project(out, source, cast(), labels, args)
+            manifest = q.load(out / "manifest.json")
+            q.check_manifest(manifest, source)
+            segments = manifest["segments"]
+        self.assertTrue(all(len(s["text"]) >= 80 for s in segments), [len(s["text"]) for s in segments])
+        self.assertEqual(" ".join(s["text"] for s in segments), text.strip())
+
+    def test_defaults_keep_a_segment_inside_the_range_the_model_handles(self):
+        """Пороги по умолчанию укладываются в 15-20 секунд речи.
+
+        Замеры по готовым книгам: 12-13,4 знака в секунду, в среднем 12,5. Цель нарезки и потолок
+        должны попадать в те самые 15-20 секунд, иначе модель либо рвётся на коротком, либо
+        сбивается на длинном.
+        """
+        import argparse, contextlib, io
+        rate = 12.5                      # знаков в секунду, замерено на четырёх книгах
+        parser = argparse.ArgumentParser()
+        defaults = {}
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                q.main()             # без аргументов argparse печатает справку и выходит
+            except SystemExit:
+                pass
+        source = pathlib.Path(q.__file__).read_text(encoding="utf-8")
+        for name, seconds in (("--target-chars", (15, 20)), ("--max-chars", (15, 21)),
+                              ("--min-chars", (5, 9))):
+            line = next(line for line in source.splitlines() if f'"{name}"' in line)
+            value = int(line.split("default=")[1].split(",")[0])
+            defaults[name] = value
+            low, high = seconds
+            self.assertLessEqual(low, value / rate, f"{name}={value} короче {low} с")
+            self.assertLessEqual(value / rate, high, f"{name}={value} длиннее {high} с")
+        self.assertLess(defaults["--min-chars"], defaults["--target-chars"])
+        self.assertLess(defaults["--target-chars"], defaults["--max-chars"])
+
     def test_epub_inline_markup_accents_and_spine_order(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "test.epub"
@@ -99,7 +190,8 @@ class PreparationTests(unittest.TestCase):
         source = {"title": "Тест", "author": "", "input_sha256": "hash", "normalization": "test",
                   "paragraphs": [paragraph], "chapters": [{"id": "ch001", "href": "chapter.xhtml", "title": "Глава"}]}
         labels = [{"id": "p1", "spans": [{"start": 0, "end": len(paragraph["text"]), "speaker": "anna", "confidence": "high", "reason": ""}]}]
-        args = SimpleNamespace(target_chars=100, max_chars=140, model="test", no_think=False)
+        args = SimpleNamespace(target_chars=100, max_chars=140, min_chars=80, model="test",
+                               no_think=False)
         with tempfile.TemporaryDirectory() as folder:
             out = Path(folder)
             q.export_project(out, source, cast(), labels, args)
