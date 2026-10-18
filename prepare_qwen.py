@@ -238,8 +238,15 @@ def validate_roles(data, batch, cast):
     return out
 
 
-def split_text(text, target=220, maximum=360):
-    """Exact slices: sentence -> clause -> word. Never slice a word silently."""
+def split_text(text, target=220, maximum=260, minimum=100):
+    """Точные куски: предложение -> часть предложения -> слово. Слово молча не режем.
+
+    minimum — самый короткий кусок, который имеет смысл синтезировать отдельно: на одно-двух-
+    словных фрагментах модель рвётся, поэтому хвост лучше приклеить к соседу, а не отдавать
+    модели одно слово. Куски длиннее maximum не делаем: по замерам книг речь идёт 12-13 знаков
+    в секунду, и потолок 260 знаков — это примерно двадцать секунд, дальше модель сбивается.
+    Режем по возможности по точкам: целое предложение лучше чуть длиннее цели, чем разрез.
+    """
     cursor = 0
     while cursor < len(text):
         rest = len(text) - cursor
@@ -257,10 +264,82 @@ def split_text(text, target=220, maximum=360):
             candidates, boundary = [m.end() for m in re.finditer(r"\s+", window) if m.end() <= maximum], "word"
         if not candidates:
             raise ValueError("Слово длиннее --max-chars: нужно исправить текст/увеличить лимит")
-        viable = [i for i in candidates if i >= min(60, target)] or candidates
+        # Пробуем не делать кусок короче minimum; если так не выходит, отступаем к прежнему
+        # правилу (не короче 60 или target), и только потом режем как получится.
+        viable = ([i for i in candidates if i >= minimum] or [i for i in candidates if i >= min(60, target)]
+                  or candidates)
         end = min(viable, key=lambda i: abs(i - target))
         yield cursor, cursor + end, boundary
         cursor += end
+
+
+def pieces_of(segment):
+    """Из чего собран сегмент: куски абзацев в порядке чтения.
+
+    Обычный сегмент — один кусок одного абзаца. Склеенный из коротких соседей — несколько
+    кусков (в том числе целые абзацы), и все они одного голоса.
+    """
+    if segment.get("sources"):
+        return segment["sources"]
+    return [{"paragraph_id": segment["paragraph_id"], "text": segment["text"],
+             "char_start": segment["source"]["char_start"], "char_end": segment["source"]["char_end"]}]
+
+
+def joinable(merged, segment, paragraphs, minimum, maximum):
+    """Можно ли дописать к предыдущему сегменту текущий: тот же голос и коротко.
+
+    Два случая: куски одного абзаца подряд (хвост короткой нарезки приклеиваем к соседу) и
+    целые короткие абзацы подряд — например, три реплики по одному слову, которые модель
+    в одиночку рвёт. Часть абзаца к чужому абзацу не приклеиваем: разметка перестала бы
+    соответствовать тексту книги.
+    """
+    previous, current = merged[-1], segment
+    if previous["speaker"] != current["speaker"] or previous["voice_id"] != current["voice_id"]:
+        return False
+    if previous["chapter_id"] != current["chapter_id"]:
+        return False
+    before, after = pieces_of(previous), pieces_of(current)
+    last, first = before[-1], after[0]
+    same_paragraph = (last["paragraph_id"] == first["paragraph_id"]
+                      and not paragraphs[last["paragraph_id"]][last["char_end"]:first["char_start"]].strip())
+    whole_paragraphs = (last["char_end"] == len(paragraphs[last["paragraph_id"]])
+                        and first["char_start"] == 0)
+    if not (same_paragraph or whole_paragraphs):
+        return False
+    if min(len(previous["text"]), len(current["text"])) >= minimum:
+        return False
+    return len(previous["text"]) + 1 + len(current["text"]) <= maximum
+
+
+def merge_short(segments, paragraphs, minimum, maximum):
+    """Склеивает короткие соседние сегменты одного голоса, в том числе соседние абзацы.
+
+    Сегмент — единица синтеза: один голос и один вызов модели. Одно-двухсловная реплика или
+    короткая строка, отданная модели в одиночку, звучит рвано, поэтому пока кусок короче
+    minimum, приклеиваем к нему соседа с тем же голосом, пока вместе не упрёмся в maximum
+    (360 символов — примерно двадцать секунд речи: дальше модель начинает сбиваться).
+
+    Абзац, целиком ушедший в склейку, остаётся в книге: он записан как отдельный кусок
+    сегмента, читается тем же голосом и связан с тем же аудио, поэтому разметка и read-along
+    не теряют ни строки.
+    """
+    merged = []
+    for segment in segments:
+        if merged and joinable(merged, segment, paragraphs, minimum, maximum):
+            previous = merged[-1]
+            previous["sources"] = pieces_of(previous) + pieces_of(segment)
+            previous["text"] = " ".join(piece["text"] for piece in previous["sources"])
+            previous["pause_after_ms"] = segment["pause_after_ms"]
+            previous["needs_review"] = previous["needs_review"] or segment["needs_review"]
+            previous["reason"] = previous["reason"] or segment["reason"]
+            continue
+        merged.append(segment)
+    for order, segment in enumerate(merged):
+        # Идентификаторы и файлы пересчитываем: склейка уменьшила число сегментов.
+        segment["order"] = order
+        segment["id"] = f"seg{order + 1:06d}"
+        segment["audio_file"] = f"audio/{segment['id']}.wav"
+    return merged
 
 
 def export_project(out, source, cast, labels, args):
@@ -280,7 +359,7 @@ def export_project(out, source, cast, labels, args):
     for paragraph, labelled in zip(source["paragraphs"], labels):
         for span in labelled["spans"]:
             original = paragraph["text"][span["start"]:span["end"]]
-            cuts = list(split_text(original, args.target_chars, args.max_chars))
+            cuts = list(split_text(original, args.target_chars, args.max_chars, min(args.min_chars, args.max_chars)))
             for index, (start, end, boundary) in enumerate(cuts):
                 cid = span["speaker"]
                 sid = f"seg{len(segments) + 1:06d}"
@@ -301,6 +380,11 @@ def export_project(out, source, cast, labels, args):
                                    "reason": segment["reason"] or "Разрез по словам: проверить естественность стыка"})
         # A paragraph pause replaces rather than adds to a role transition pause.
         segments[-1]["pause_after_ms"] = 300
+    paragraphs = {p["id"]: p["text"] for p in source["paragraphs"]}
+    segments = merge_short(segments, paragraphs, args.min_chars, args.max_chars)
+    review = [{"segment_id": s["id"], "text": s["text"], "speaker": s["speaker"],
+               "reason": s["reason"] or "Разрез по словам: проверить естественность стыка"}
+              for s in segments if s["needs_review"]]
     chapter_plan = []
     for chapter in source["chapters"]:
         own = [s for s in segments if s["chapter_id"] == chapter["id"]]
@@ -316,7 +400,8 @@ def export_project(out, source, cast, labels, args):
                 "models": {"design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", "synthesis": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"},
                 "workflow": "Generate one reference per voice with VoiceDesign; reuse create_voice_clone_prompt with Base for all its segments",
                 "llm": {"provider": "ollama", "model": args.model, "thinking": not args.no_think},
-                "chunking": {"target_chars": args.target_chars, "max_chars": args.max_chars},
+                "chunking": {"target_chars": args.target_chars, "max_chars": args.max_chars,
+                             "min_chars": args.min_chars},
                 "stats": stats, "voices": voices, "chapters": chapter_plan, "segments": segments}
     if getattr(args, "roles_overrides", None):
         manifest["manual_roles_sha256"] = digest(load(args.roles_overrides))
@@ -368,9 +453,8 @@ def check_manifest(manifest, source):
     if len({v["voice_id"] for v in voices}) != len(voices) or len({v["instruct"] for v in voices}) != len(voices):
         raise ValueError("Голоса должны быть уникальны")
     lookup = {v["id"]: v["voice_id"] for v in voices}
-    by_paragraph = {}
     paragraph_lookup = {p["id"]: p for p in source["paragraphs"]}
-    sequence = []
+    by_paragraph, sequence = {}, []
     for i, s in enumerate(manifest["segments"]):
         if s["order"] != i or not s["text"] or len(s["text"]) > manifest["chunking"]["max_chars"]:
             raise ValueError("Неверный порядок/размер сегмента")
@@ -378,24 +462,28 @@ def check_manifest(manifest, source):
             raise ValueError("Голос не соответствует роли")
         if s["speaker"] is None and (s["voice_id"] is not None or not s["needs_review"]):
             raise ValueError("Неясную роль нельзя озвучить назначенным голосом")
-        paragraph = paragraph_lookup.get(s["paragraph_id"])
-        if paragraph is None or s["chapter_id"] != paragraph["chapter_id"]:
-            raise ValueError("Неизвестный абзац/неверная глава")
-        if any(s["source"].get(k) != v for k, v in paragraph["source"].items()):
-            raise ValueError("Ссылка на XHTML не соответствует исходному блоку")
-        if not sequence or sequence[-1] != s["paragraph_id"]:
-            sequence.append(s["paragraph_id"])
-        by_paragraph.setdefault(s["paragraph_id"], []).append(s)
+        if s["text"] != " ".join(piece["text"] for piece in pieces_of(s)):
+            raise ValueError("Текст сегмента не совпадает со своими кусками")
+        for piece in pieces_of(s):
+            paragraph = paragraph_lookup.get(piece["paragraph_id"])
+            if paragraph is None or paragraph["chapter_id"] != s["chapter_id"]:
+                raise ValueError("Кусок сегмента ссылается на чужой абзац или главу")
+            for key in ("href", "block_index", "element_id", "tag"):
+                if piece is pieces_of(s)[0] and s["source"].get(key) != paragraph["source"].get(key):
+                    raise ValueError("Ссылка на XHTML не соответствует исходному блоку")
+            by_paragraph.setdefault(piece["paragraph_id"], []).append(piece)
+            if not sequence or sequence[-1] != piece["paragraph_id"]:
+                sequence.append(piece["paragraph_id"])
     if sequence != [p["id"] for p in source["paragraphs"]]:
         raise ValueError("Порядок абзацев изменён")
     for p in source["paragraphs"]:
         cursor = 0
-        for s in by_paragraph.get(p["id"], []):
-            a, b = s["source"]["char_start"], s["source"]["char_end"]
+        for piece in by_paragraph.get(p["id"], []):
+            a, b = piece["char_start"], piece["char_end"]
             if a < cursor or not a < b <= len(p["text"]) or p["text"][cursor:a].strip():
                 raise ValueError(f"Потеря/перекрытие текста {p['id']}")
-            if p["text"][a:b].strip() != s["text"]:
-                raise ValueError("Текст сегмента не соответствует источнику")
+            if p["text"][a:b].strip() != piece["text"]:
+                raise ValueError("Текст куска не соответствует источнику")
             cursor = b
         if p["text"][cursor:].strip():
             raise ValueError(f"Потеря конца абзаца {p['id']}")
@@ -539,13 +627,21 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=64000)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--batch-chars", type=int, default=4000)
-    parser.add_argument("--target-chars", type=int, default=220)
-    parser.add_argument("--max-chars", type=int, default=360)
+    # Замеры по готовым книгам: 12-13,4 знака в секунду (в среднем 12,5). Значит 15-20 секунд
+    # речи — это 190-250 знаков: цель 220 (около 18 с), потолок 260 (около 21 с). Кусок короче
+    # 100 знаков (примерно 8 с) модель рвёт, поэтому такой приклеиваем к соседу того же голоса.
+    parser.add_argument("--target-chars", type=int, default=220, help="цель нарезки, знаков")
+    parser.add_argument("--max-chars", type=int, default=260,
+                        help="потолок: дальше не тянем даже целое предложение, знаков")
+    parser.add_argument("--min-chars", type=int, default=100,
+                        help="короче этого куски склеиваем с соседом того же голоса")
     parser.add_argument("--cast", help="исправленный cast.json от этой книги; пропустить облачный поиск ролей")
     parser.add_argument("--roles-overrides", help="JSON с исправленными абзацами (input_sha256, paragraphs с segments)")
     args = parser.parse_args()
-    if not 60 <= args.target_chars <= args.max_chars or args.batch_chars < 500 or args.max_tokens < 1000:
-        parser.error("Нужны 60 <= target-chars <= max-chars, batch-chars >= 500, max-tokens >= 1000")
+    if (not 60 <= args.target_chars <= args.max_chars or args.batch_chars < 500 or args.max_tokens < 1000
+            or not 0 <= args.min_chars <= args.max_chars):
+        parser.error("Нужны 60 <= target-chars <= max-chars, batch-chars >= 500, max-tokens >= 1000, "
+                     "0 <= min-chars <= max-chars")
     try:
         prepare(args)
     except (ValueError, OSError, KeyError, zipfile.BadZipFile) as exc:

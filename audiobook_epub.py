@@ -146,48 +146,65 @@ def boundary_pause(segment, next_segment=None, sentence_ms=450, paragraph_ms=800
     return 180 if next_segment["speaker"] != segment["speaker"] else 100
 
 
+def source_pieces(segment):
+    """Куски абзацев, из которых собран сегмент (склейка коротких соседей даёт несколько)."""
+    if segment.get("sources"):
+        return segment["sources"]
+    return [{"paragraph_id": segment["paragraph_id"], "text": segment["text"],
+             "char_start": segment["source"]["char_start"], "char_end": segment["source"]["char_end"]}]
+
+
 def sentence_segments(manifest, sentence_ms=450, paragraph_ms=800):
     from razdel import sentenize
     from types import SimpleNamespace
     result = []
     for parent in manifest["segments"]:
-        sentences = list(sentenize(parent["text"]))
-        # Razdel may emit the closing dialogue dash as its own sentence.
-        # Attach it to the preceding sentence within the SAME role/source span.
-        joined = []
-        for sentence in sentences:
-            if joined and not any(c.isalnum() for c in sentence.text):
-                previous = joined[-1]
-                joined[-1] = SimpleNamespace(start=previous.start, stop=sentence.stop,
-                    text=parent["text"][previous.start:sentence.stop])
-            else:
-                joined.append(sentence)
-        sentences = joined
-        if not sentences:
-            raise ValueError("Пустой фрагмент: " + parent["id"])
-        base = parent["source"]["char_start"]
-        paragraph = manifest.get("paragraph_texts", {}).get(parent["paragraph_id"])
-        if paragraph is not None:
-            raw = paragraph[base:parent["source"]["char_end"]]
-            if raw.strip() != parent["text"]:
-                raise ValueError("Источник не соответствует тексту для деления на предложения")
-            base += len(raw) - len(raw.lstrip())
-        for number, sentence in enumerate(sentences, 1):
-            row = deepcopy(parent)
-            # TTS offsets differ after numeral expansion; never slice/inherit a
-            # parent's normalized speech target into a newly split sentence.
-            for key in list(row):
-                if key.startswith("tts_"):
-                    del row[key]
-            row["id"] = parent["id"] + f"_s{number:03d}" if len(sentences) > 1 else parent["id"]
-            row["sentence_parent"] = parent["id"]
-            row["text"] = sentence.text
-            row["source"].update(char_start=base + sentence.start, char_end=base + sentence.stop)
-            row["pause_after_ms"] = parent["pause_after_ms"] if number == len(sentences) else 150
-            row["audio_file"] = "audio/" + row["id"] + ".wav"
-            row["split_boundary"] = "sentence"
-            row["order"] = len(result)
-            result.append(row)
+        number = 0
+        for piece in source_pieces(parent):
+            sentences = list(sentenize(piece["text"]))
+            # Razdel may emit the closing dialogue dash as its own sentence.
+            # Attach it to the preceding sentence within the SAME role/source span.
+            joined = []
+            for sentence in sentences:
+                if joined and not any(c.isalnum() for c in sentence.text):
+                    previous = joined[-1]
+                    joined[-1] = SimpleNamespace(start=previous.start, stop=sentence.stop,
+                        text=piece["text"][previous.start:sentence.stop])
+                else:
+                    joined.append(sentence)
+            sentences = joined
+            if not sentences:
+                raise ValueError("Пустой фрагмент: " + parent["id"])
+            base = piece["char_start"]
+            paragraph = manifest.get("paragraph_texts", {}).get(piece["paragraph_id"])
+            if paragraph is not None:
+                raw = paragraph[base:piece["char_end"]]
+                if raw.strip() != piece["text"]:
+                    raise ValueError("Источник не соответствует тексту для деления на предложения")
+                base += len(raw) - len(raw.lstrip())
+            for sentence in sentences:
+                number += 1
+                row = deepcopy(parent)
+                # TTS offsets differ after numeral expansion; never slice/inherit a
+                # parent's normalized speech target into a newly split sentence.
+                for key in list(row):
+                    if key.startswith("tts_"):
+                        del row[key]
+                row.pop("sources", None)
+                # Склеенный из нескольких абзацев сегмент всегда делится: иначе первый кусок
+                # занял бы идентификатор всего сегмента и разошёлся бы с дорожкой синтеза.
+                suffixed = len(sentences) > 1 or len(source_pieces(parent)) > 1
+                row["id"] = parent["id"] + f"_s{number:03d}" if suffixed else parent["id"]
+                row["sentence_parent"] = parent["id"]
+                row["paragraph_id"] = piece["paragraph_id"]
+                row["text"] = sentence.text
+                row["source"] = dict(parent["source"], char_start=base + sentence.start,
+                                     char_end=base + sentence.stop)
+                row["pause_after_ms"] = parent["pause_after_ms"]
+                row["audio_file"] = "audio/" + row["id"] + ".wav"
+                row["split_boundary"] = "sentence"
+                row["order"] = len(result)
+                result.append(row)
     for i, row in enumerate(result):
         row["pause_after_ms"] = boundary_pause(row, result[i + 1] if i + 1 < len(result) else None, sentence_ms, paragraph_ms)
     return result
@@ -263,7 +280,8 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
     used = {s["speaker"] for s in manifest["segments"]}
     source_json = Path(manifest_path).parent / "source.json"
     if source_json.exists():
-        selected_paragraphs = {s["paragraph_id"] for s in manifest["segments"]}
+        selected_paragraphs = {piece["paragraph_id"] for s in manifest["segments"]
+                               for piece in source_pieces(s)}
         manifest["paragraph_texts"] = {p["id"]: p["text"] for p in load(source_json)["paragraphs"] if p["id"] in selected_paragraphs}
     if highlight == "sentence":
         manifest["segments"] = sentence_segments(manifest, sentence_ms, paragraph_ms)
