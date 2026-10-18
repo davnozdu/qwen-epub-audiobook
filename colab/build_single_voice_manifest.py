@@ -67,7 +67,7 @@ def split_paragraph(text, dialogue_id="dialog"):
     return spans
 
 
-def build(book, out, target_chars=220, max_chars=360, dialogue_id="dialog"):
+def build(book, out, target_chars=220, max_chars=260, min_chars=100, dialogue_id="dialog"):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     source = read_source(str(book))
@@ -97,7 +97,8 @@ def build(book, out, target_chars=220, max_chars=360, dialogue_id="dialog"):
     write(out / "cast.json", dict(cast, input_sha256=source["input_sha256"]))
     write(out / "roles.json", {"paragraphs": labels})
 
-    args = SimpleNamespace(target_chars=target_chars, max_chars=max_chars, model="one-reader",
+    args = SimpleNamespace(target_chars=target_chars, max_chars=max_chars, min_chars=min_chars,
+                           model="one-reader",
                            no_think=True, roles_overrides=None)
     export_project(out, source, cast, labels, args)
 
@@ -116,6 +117,7 @@ if __name__ == "__main__":
     parser.add_argument("book")
     parser.add_argument("-o", "--out", required=True)
     parser.add_argument("--target-chars", type=int, default=220)
-    parser.add_argument("--max-chars", type=int, default=360)
+    parser.add_argument("--max-chars", type=int, default=260)
+    parser.add_argument("--min-chars", type=int, default=100)
     a = parser.parse_args()
-    build(a.book, a.out, a.target_chars, a.max_chars)
+    build(a.book, a.out, a.target_chars, a.max_chars, a.min_chars)

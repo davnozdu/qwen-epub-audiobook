@@ -381,7 +381,10 @@ def export_project(out, source, cast, labels, args):
         # A paragraph pause replaces rather than adds to a role transition pause.
         segments[-1]["pause_after_ms"] = 300
     paragraphs = {p["id"]: p["text"] for p in source["paragraphs"]}
-    segments = merge_short(segments, paragraphs, args.min_chars, args.max_chars)
+    # Значения по умолчанию — на случай вызовов, которые собирают аргументы сами (например,
+    # одноголосая сборка для Colab): без них склейка коротких просто не включилась бы молча.
+    minimum = int(getattr(args, "min_chars", 100) or 0)
+    segments = merge_short(segments, paragraphs, minimum, args.max_chars)
     review = [{"segment_id": s["id"], "text": s["text"], "speaker": s["speaker"],
                "reason": s["reason"] or "Разрез по словам: проверить естественность стыка"}
               for s in segments if s["needs_review"]]
