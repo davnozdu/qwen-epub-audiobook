@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 
-VERSION = "supertonic-python-4"   # 4: скобки, латиница и знаки словами; 3: тире убраны, дефисные слова склеены
+VERSION = "supertonic-python-5"   # 5: дефис после ударения и слова капсом через дефис; 4: скобки, латиница и знаки словами; 3: тире убраны, дефисные слова склеены
 RULES = json.loads(Path(__file__).with_name("supertonic_rules.json").read_text(encoding="utf-8"))
 FORMS = {row[0]: row for row in RULES["forms"]}
 ROOTS = {int(n): root for n, root in RULES["ordinal_roots"].items()}
@@ -384,7 +384,10 @@ def normalize(text, strict=True, unresolved=None):
         # Буквы называем по отдельности: пробел между ними читается как перечисление букв,
         # а дефис в озвучке мешает так же, как тире.
         return " ".join(letter_names[c] for c in word) if spell else word.lower()
-    text = re.sub(r"(?<!\w)[А-ЯЁ]{2,8}(?!\w)", acronym, text)
+    text = re.sub(rf"(?<!\w)[А-ЯЁ]+(?:[{DASHES}-][А-ЯЁ]+)+(?!\w)", lambda m: m[0].lower(), text)
+    # Слово капсом через дефис («ПО-РУССКИ», «КТО-ТО» в заголовке) — не аббревиатура: иначе «ПО»
+    # читалось бы по буквам («пэ о»).
+    text = re.sub(rf"(?<!\w)(?<![^\W\d_][{DASHES}-])[А-ЯЁ]{{2,8}}(?!\w)(?![{DASHES}-][^\W\d_])", acronym, text)
     # Do not silently mispronounce invalid formats or oversized numbers — но и не ронять книгу:
     # в мягком режиме такое число остаётся как есть и попадает в список на ручную проверку.
     leftover = re.findall(r"\d[\w.,:/–—-]*", text)
@@ -420,7 +423,9 @@ def speech_punctuation(text):
     text = re.sub(rf"(?<=\d)\s*[{DASHES}-]+\s*(?=\d)", "-", text)     # 5–10: диапазон, а не пауза
     # Склеиваем только буквы: «как-будто» → «какбудто». Дефис между цифрами (дата, диапазон)
     # не трогаем — это число, а не знак паузы.
-    text = re.sub(rf"(?<=[^\W\d_])[{DASHES}-]+(?=[^\W\d_])", "", text)
+    # Ударение перед дефисом («что́-то») — тоже буква слова: без этого дефис оставался, и модель
+    # делала микропаузу посреди слова.
+    text = re.sub(rf"(?<=[^\W\d_]|\u0301)[{DASHES}-]+(?=[^\W\d_])", "", text)
     opening = "«„\"'(\\[<"
     # Реплика внутри кавычек: «— О, ещё бы!» — тире убираем вместе с его пробелом, иначе
     # останется « О», и модель прочтёт лишнюю паузу.

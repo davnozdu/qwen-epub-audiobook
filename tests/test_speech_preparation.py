@@ -237,6 +237,25 @@ class StressTests(unittest.TestCase):
             with self.subTest(source=source):
                 self.assertEqual(r.speech_punctuation(source), spoken)
 
+    def test_hyphenated_particles_and_prefixes_have_no_pause(self):
+        # Дефис внутри слова модель читает микропаузой: частицы и приставки склеиваются.
+        cases = {
+            "Кто-то пришёл.": "Ктото пришёл.", "Скажи-ка мне.": "Скажика мне.",
+            "Где-нибудь и когда-либо.": "Гденибудь и когдалибо.", "Кое-что случилось.": "Коечто случилось.",
+            "По-моему, это по-русски.": "Помоему, это порусски.", "Из-за дождя, из-под стола.": "Изза дождя, изпод стола.",
+            "Вот-вот, всё-таки, ну-ка.": "Вотвот, всётаки, нука.",
+            "Что\u0301-то упало.": "Что\u0301то упало.",          # авторское ударение перед дефисом
+            "Кто\u2011то": "Ктото", "Где\u2013то": "Гдето",        # неразрывный дефис, тире без пробелов
+            "ПО-РУССКИ": "порусски", "КТО-ТО ПРИШЁЛ": "ктото пришёл",   # капсом — не аббревиатура
+            "ФСБ": "эф эс бэ",                                       # а настоящая аббревиатура — по буквам
+            "страницы 5-10": "страницы от пяти до десяти",
+        }
+        for source, spoken in cases.items():
+            with self.subTest(source=source):
+                result = r.normalize(source, strict=False)
+                self.assertEqual(result, spoken)
+                self.assertNotRegex(result, r"[^\W\d_]\u0301?[-\u2010-\u2015]")
+
     def test_latin_and_signs_are_read_as_russian_words(self):
         cases = {
             "Он сказал: Hello, world!": "Он сказал: хелло, ворлд!",
