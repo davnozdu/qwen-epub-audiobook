@@ -50,6 +50,7 @@ except ImportError:                 # pragma: no cover - Windows
     pty = None
 import time
 import urllib.request
+import zipfile
 
 IS_WINDOWS = os.name == "nt"
 DEFAULT_LOCAL_BIN = pathlib.Path.home() / ".local" / "bin"
@@ -759,18 +760,23 @@ def fetch_parts(colab: str, session: str, plan: dict | None, target_dir: pathlib
 
 
 def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
-                   drive_dir: str, job: pathlib.Path, shrink: dict) -> pathlib.Path:
+                   drive_dir: str, job: pathlib.Path, shrink: dict, raw: dict = None) -> pathlib.Path:
     """Задание уходит на машину вместе с аргументами: colab exec аргументы не передаёт."""
     args = [book_remote]
     if fragment:
         args += ["--seconds", fragment]
     if highlight:
         args += ["--highlight", highlight]
-    args += ["--drive-dir", drive_dir] if drive else ["--no-drive"]
-    if shrink.get("off"):
-        args += ["--no-shrink"]
+    if raw:
+        # Режим частей: только синтез, Drive не участвует, книга собирается в образе.
+        args += ["--no-drive", "--no-shrink", "--raw", "--upto", "synth",
+                 "--part-index", str(raw.get("part", ""))]
     else:
-        args += ["--max-hours", str(shrink["max_hours"]), "--shrink-dir", str(shrink["dir"])]
+        args += ["--drive-dir", drive_dir] if drive else ["--no-drive"]
+        if shrink.get("off"):
+            args += ["--no-shrink"]
+        else:
+            args += ["--max-hours", str(shrink["max_hours"]), "--shrink-dir", str(shrink["dir"])]
     head = ("import sys\n"
             f"sys.argv = {json.dumps(['qwen_tts_book.py', *args])}\n"
             '__name__ = "__main__"\n')
@@ -779,6 +785,65 @@ def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
         stream.write(head + job.read_text(encoding="utf-8"))
     print("задание с параметрами:", " ".join(args), flush=True)
     return pathlib.Path(path)
+
+
+def fetch_raw(colab, args, stem) -> int:
+    """Режим частей: забираем СЫРЬЁ части в том бота. Ни Drive, ни готового архива тут нет.
+
+    Часть сразу собирается как самостоятельная книга — но В ОБРАЗЕ, а не на машине: иначе её
+    пришлось бы кодировать в облаке, а потом раскодировать для финала, и книга получила бы
+    вторую генерацию AAC-потерь.
+    """
+    parts_dir = pathlib.Path(args.parts_dir or downloads_dir())
+    parts_dir.mkdir(parents=True, exist_ok=True)
+    remote_zip = f"/content/out/{stem}-raw.zip"
+    local_zip = parts_dir / f"{stem}-raw.zip"
+    downloaded = False
+    for attempt in (1, 2):
+        if run([colab, "download", "-s", args.session, remote_zip, str(local_zip)],
+               timeout=3600).returncode == 0:
+            downloaded = True
+            break
+        print(f"  сырьё не забралось с попытки {attempt} — пробую ещё раз", flush=True)
+    if not downloaded:
+        print(f"  сырья на машине нет: {remote_zip}")
+        notify_telegram(f"⚠️ Сырьё части {args.part_index} для «{stem}» не забралось.\n"
+                        f"Повторить: colab download -s {args.session} {remote_zip} {local_zip}")
+        if args.stop_on_failure:
+            run_quiet([colab, "stop", "-s", args.session])
+        return 1
+    print(f"сырьё части {args.part_index}: {local_zip.name} ({local_zip.stat().st_size / 1e6:.1f} МБ)")
+    notify_telegram(f"📦 Часть {args.part_index} озвучена, сырьё забрано в том ({stem}-raw.zip)")
+
+    part = parts_dir / f"part-{args.part_index}"
+    if part.exists():                            # распаковываем только сырьё этой части
+        shutil.rmtree(part)
+    part.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(local_zip) as zf:
+        zf.extractall(part)
+    local_zip.unlink(missing_ok=True)            # сырьё уже распаковано: архив в томе не нужен
+    print(f"сырьё части {args.part_index} распаковано: {part}")
+
+    # Часть становится самостоятельной книгой: без громкости, фильтра и музыки — как есть.
+    glue = pathlib.Path(__file__).resolve().parent.parent.parent / "glue_book.py"
+    if not glue.is_file():
+        print(f"нет сборщика частей {glue} — сырьё лежит в {part}, часть не собрана")
+        return 1
+    command = [sys.executable, str(glue), "--mode", "part", "--part", str(args.part_index),
+               "--parts-dir", str(parts_dir), "--out", str(args.out_dir or downloads_dir()),
+               "--name", stem]
+    print("== собираю часть в образе ==\n  " + " ".join(command), flush=True)
+    code = subprocess.run(command, cwd=str(glue.parent)).returncode
+    if code != 0:
+        notify_telegram(f"⚠️ Часть {args.part_index} озвучена, но собрать её не вышло (код {code}). "
+                        f"Сырьё на месте: {part}")
+        return 1
+    print(f"часть {args.part_index} готова: {args.out_dir or downloads_dir()}")
+    notify_telegram(f"✅ Часть {args.part_index} «{stem}» готова (файлами в архивах)")
+    if not args.keep_session:
+        print("== освобождаю машину ==")
+        run_quiet([colab, "stop", "-s", args.session])
+    return 0
 
 
 # ────────────────────────────── основной ход ──────────────────────────────
@@ -807,6 +872,14 @@ def main() -> int:
                         help="гасить машину и при неудаче: ничего не оставляем запущенным")
     parser.add_argument("--no-auto-enter", action="store_true",
                         help="не нажимать Enter за меня: подтверждение придётся давать вручную")
+    parser.add_argument("--parts-raw", action="store_true",
+                        default=os.environ.get("PARTS_RAW", "0") == "1",
+                        help="режим частей: часть идёт только на синтез, сырьё забирается в том, "
+                             "часть и финал собираются в образе; Drive не участвует")
+    parser.add_argument("--part-index", default=os.environ.get("PART_INDEX", ""),
+                        help="номер части в режиме частей")
+    parser.add_argument("--parts-dir", default=os.environ.get("PARTS_DIR", ""),
+                        help="куда складывать сырьё частей (том бота)")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
                         help="если книга длиннее — задание разрежет её на части (0 — не резать)")
     parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
@@ -879,7 +952,8 @@ def main() -> int:
     book = book.resolve()
     stem = book.stem or "book"
     remote_book = f"/content/{stem}.epub"
-    shrink = {"max_hours": args.max_hours, "dir": args.shrink_dir, "off": args.no_shrink}
+    shrink = {"max_hours": args.max_hours, "dir": args.shrink_dir,
+              "off": args.no_shrink or args.parts_raw}      # в режиме частей книгу режет бот, не машина
 
     def fail() -> int:
         print("\n== не получилось, освобождаю машину ==")
@@ -900,7 +974,9 @@ def main() -> int:
         return fail()
 
     drive_ok = False
-    if not args.no_drive:
+    if args.parts_raw:
+        print("  режим частей: Google Drive не участвует — сырьё вернётся в том бота")
+    elif not args.no_drive:
         if args.no_auto_enter:
             os.environ["DRIVE_AUTO_ENTER"] = "0"
         drive_ok = mount_drive(colab, args.session, args.drive_wait, gpu=args.gpu,
@@ -914,7 +990,7 @@ def main() -> int:
         return fail()
 
     generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir,
-                               job, shrink)
+                               job, shrink, {"part": args.part_index} if args.parts_raw else None)
     print("\n== задание ==")
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
@@ -933,6 +1009,8 @@ def main() -> int:
         print(f"== CLI вернул код {code} — это может быть таймаут ожидания кернела, а не ошибка задания")
 
     print("\n== забираю архив ==")
+    if args.parts_raw:
+        return fetch_raw(colab, args, stem)
     # Толстая книга режется на части ещё на машине: узнаём по плану, как называется архив.
     plan = fetch_plan(colab, args.session, stem, downloads_dir())
     if plan and plan.get("parts", 1) <= 1:

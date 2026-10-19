@@ -39,6 +39,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -294,6 +295,8 @@ def run_pipeline(args, runner, book):
                "--out", str(args.out), "--highlight", args.highlight,
                "--polish", args.polish,
                "--model-dir", str(args.model_dir)]
+    if args.upto and args.upto != "package":
+        command += ["--upto", args.upto]        # режим частей останавливает конвейер на синтезе
     if args.seconds:
         command += ["--test-seconds", str(args.seconds)]
     if args.voice:
@@ -419,6 +422,71 @@ def pack(args, book):
     return archive
 
 
+def pack_raw(args, book):
+    """Сырьё части: только то, из чего в образе соберут книгу. Часть отдаётся КАК ЕСТЬ.
+
+    Ни выравнивания громкости, ни фильтра, ни музыки, ни m4b здесь нет: всё это можно
+    переделать без GPU, поэтому оно живёт в образе. Сегменты едут во FLAC (сжатие без потерь):
+    1.5 ч это ≈260 МБ WAV против ≈110–140 МБ FLAC. sample.wav не везём вовсе — дорожку книга
+    соберёт себе сама из сегментов, зато не будет второй генерации AAC-потерь.
+
+    Манифесты нужны оба: проектный (главы, абзацы, абзацные тексты) и подготовленный
+    (сегменты), плюс book-text.epub — на них опирается и сборка части, и финал.
+    """
+    project = pathlib.Path(args.out) / "project"
+    source = project / "source"
+    audio = project / "audio"
+    required = [project / "manifest.json", source / "manifest.json", source / "book-text.epub",
+                audio / "timeline.json", audio / "benchmark.json"]
+    missing = [str(item) for item in required if not item.is_file()]
+    assert not missing, f"нет сырья для части: {missing}"
+
+    converter = shutil.which("ffmpeg")
+    assert converter, "нет ffmpeg: сегменты не во что упаковать (в образе он есть, на машине поставьте ffmpeg)"
+    archive = pathlib.Path(args.zip)
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    segments = sorted((audio / "segments").glob("*.wav"))
+    assert segments, f"нет сегментов в {audio / 'segments'}"
+
+    with tempfile.TemporaryDirectory(prefix="qwen-raw-") as temporary:
+        flac_dir = pathlib.Path(temporary) / "segments"
+        flac_dir.mkdir()
+        total = 0
+        for wav in segments:
+            target = flac_dir / (wav.stem + ".flac")
+            done = subprocess.run([converter, "-hide_banner", "-loglevel", "error", "-y", "-i", str(wav),
+                                   "-c:a", "flac", str(target)], env=dict(os.environ))
+            assert done.returncode == 0, f"не сжалось во FLAC: {wav}"
+            total += target.stat().st_size
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name in ("manifest.json", "source.json"):
+                if (project / name).is_file():
+                    zf.write(project / name, arcname=f"project/{name}")
+            for name in ("manifest.json", "book-text.epub"):
+                zf.write(source / name, arcname=f"project/source/{name}")
+            # Обложка: на неё ссылаются оба манифеста, без неё сборка части (m4b) не начнётся.
+            for folder, prefix in ((project, "project"), (source, "project/source")):
+                cover = (json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+                         .get("book", {}).get("cover") or {}).get("file")
+                if cover and (folder / cover).is_file():
+                    zf.write(folder / cover, arcname=f"{prefix}/{cover}")
+            for name in ("timeline.json", "benchmark.json"):
+                zf.write(audio / name, arcname=f"project/audio/{name}")
+            for flac in sorted(flac_dir.iterdir()):
+                zf.write(flac, arcname=f"project/audio/segments/{flac.name}")
+
+    hasher = hashlib.sha256()
+    with archive.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            hasher.update(chunk)
+    banner("Сырьё части готово")
+    print(f"  сегментов : {len(segments)} (FLAC {total / 1e6:.1f} МБ)")
+    print(f"  архив     : {archive}  ({archive.stat().st_size / 1e6:.1f} МБ)")
+    print(f"  sha256    : {hasher.hexdigest()}")
+    print("  громкость, фильтр, музыка и сборка — в образе: там это минуты и без GPU")
+    return archive
+
+
 def main():
     parser = argparse.ArgumentParser(description="EPUB → ZIP с аудиокнигой и read-along EPUB")
     parser.add_argument("book", nargs="?", default="",
@@ -447,6 +515,12 @@ def main():
                         help="не резать книгу на части")
     parser.add_argument("--local", action="store_true",
                         help="локальный прогон (macOS/Metal): без pip install и без требования GPU")
+    parser.add_argument("--raw", action="store_true",
+                        help="режим частей: остановиться на синтезе и отдать СЫРЬЁ части (FLAC), "
+                             "без громкости, музыки и сборки — их делает образ")
+    parser.add_argument("--part-index", default="", help="номер части (только для журнала)")
+    parser.add_argument("--upto", default="package",
+                        help="остановиться на стадии конвейера (в режиме частей всегда synth)")
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)
     if extra:
         print("лишние аргументы проигнорированы:", extra, flush=True)
@@ -492,6 +566,15 @@ def main():
     os.environ["STEM"] = stem          # обёртка по нему найдёт архив и части
 
     pathlib.Path(args.out).mkdir(parents=True, exist_ok=True)
+    if args.raw:
+        # Режим частей: конвейер идёт ТОЛЬКО до синтеза, наружу уходит сырьё, книга собирается в образе.
+        args.upto = "synth"
+        args.zip = base / f"{stem}-raw.zip"
+        print(f"  части: {args.part_index or '?'} — сырьё уходит в {args.zip.name}, "
+              f"Drive не участвует")
+        run_pipeline(args, runner, book)
+        pack_raw(args, book)
+        return
     run_pipeline(args, runner, book)
     pack(args, book)
 
