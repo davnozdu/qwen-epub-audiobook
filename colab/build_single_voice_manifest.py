@@ -97,7 +97,7 @@ def build(book, out, target_chars=220, max_chars=260, min_chars=100, dialogue_id
     write(out / "cast.json", dict(cast, input_sha256=source["input_sha256"]))
     write(out / "roles.json", {"paragraphs": labels})
 
-    args = SimpleNamespace(target_chars=target_chars, max_chars=max_chars, min_chars=min_chars,
+    args = SimpleNamespace(book=str(book), target_chars=target_chars, max_chars=max_chars, min_chars=min_chars,
                            model="one-reader",
                            no_think=True, roles_overrides=None)
     export_project(out, source, cast, labels, args)

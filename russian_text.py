@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 import re
 
-VERSION = "supertonic-python-3"   # 3: тире убраны из текста для синтеза, дефисные слова склеены
+VERSION = "supertonic-python-4"   # 4: скобки, латиница и знаки словами; 3: тире убраны, дефисные слова склеены
 RULES = json.loads(Path(__file__).with_name("supertonic_rules.json").read_text(encoding="utf-8"))
 FORMS = {row[0]: row for row in RULES["forms"]}
 ROOTS = {int(n): root for n, root in RULES["ordinal_roots"].items()}
@@ -394,9 +394,12 @@ def normalize(text, strict=True, unresolved=None):
                              + ", ".join(leftover[:3]))
         if unresolved is not None:
             unresolved.extend(leftover)
+    # \u0422\u0435\u043a\u0441\u0442 \u0434\u043b\u044f \u043c\u043e\u0434\u0435\u043b\u0438 \u0433\u043e\u0442\u043e\u0432\u0438\u043c \u0434\u043e \u0432\u043e\u0437\u0432\u0440\u0430\u0442\u0430 \u0430\u0434\u0440\u0435\u0441\u043e\u0432 \u0438 \u043f\u043e\u0447\u0442\u044b: \u043e\u043d\u0438 \u043e\u0441\u0442\u0430\u044e\u0442\u0441\u044f \u043d\u0435\u043f\u0440\u043e\u0437\u0440\u0430\u0447\u043d\u044b\u043c\u0438,
+    # \u0431\u0435\u0437 \u0442\u0440\u0430\u043d\u0441\u043b\u0438\u0442\u0435\u0440\u0430\u0446\u0438\u0438 \u0438 \u0431\u0435\u0437 \u0441\u043b\u043e\u0432 \u0432\u043c\u0435\u0441\u0442\u043e \u0437\u043d\u0430\u043a\u043e\u0432.
+    text = speech_punctuation(re.sub(r"[ \t]+", " ", text).strip())
     for i, original in enumerate(protected):
         text = text.replace("\ue000" + chr(0xE100 + i) + "\ue001", original)
-    return speech_punctuation(re.sub(r"[ \t]+", " ", text).strip())
+    return text
 
 
 # Тире во всех начертаниях. Дефис-минус в этот список не входит: он внутри слов.
@@ -424,4 +427,58 @@ def speech_punctuation(text):
     text = re.sub(rf"(?<=[{opening}])[{DASHES}-]+\s+", "", text)
     text = re.sub(rf"(?:(?<=\s)|^)[{DASHES}-]+(?=\s|$)", "", text)                 # тире — вон
     text = re.sub(rf"(?<=\w)[{DASHES}-]+(?=\s|$)", "", text)           # «слово– другое» — тоже тире
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
+    return speech_symbols(re.sub(r"[ \t]{2,}", " ", text).strip())
+
+
+# Латиница → кириллица, как запасной путь в supertonic-android (ForeignText.transliterate):
+# русский голос на латинице спотыкается. Чешские буквы — оттуда же; прочие буквы с
+# диакритикой (ü, ç, à…) сводим к базовой латинской букве.
+LATIN = dict(zip("abcdefghijklmnopqrstuvwxyz",
+                 "а б к д е ф г х и дж к л м н о п к р с т у в в кс и з".split()))
+LATIN.update({"á": "а", "č": "ч", "ď": "д", "é": "е", "ě": "е", "í": "и", "ň": "н", "ó": "о", "ř": "рж",
+              "š": "ш", "ť": "т", "ú": "у", "ů": "у", "ý": "и", "ž": "ж", "ß": "сс", "æ": "е", "œ": "е", "ø": "о"})
+# Знаки, которые модель не произносит, а спотыкается на них: читаем словами.
+SYMBOL_WORDS = {"№": "номер", "§": "параграф", "&": "и", "+": "плюс", "=": "равно", "×": "на", "~": "около"}
+OPEN_BRACKETS, CLOSE_BRACKETS = "([{（［｛", ")]}）］｝"
+
+
+def latin_letter(char):
+    import unicodedata
+    if not unicodedata.name(char, "").startswith("LATIN"):
+        return char
+    low = char.lower()
+    if low in LATIN:
+        return LATIN[low]
+    base = unicodedata.normalize("NFKD", low)[0]
+    return LATIN.get(base, char)
+
+
+def speech_symbols(text):
+    """Скобки, латиница и служебные знаки — словами, только в тексте для модели.
+
+    На скобках модель спотыкается так же, как на тире, а выбросить их нельзя: пояснение в
+    скобках без скобок меняет смысл фразы. Поэтому скобку проговариваем: «скобка открывается,
+    …, скобка закрывается» — запятые дают ей естественную паузу. Звёздочки (сноски, «* * *»)
+    не речь — убираем. Кавычки разных начертаний сводим к «ёлочкам».
+    """
+    text = re.sub(r"[^\W\d_]+", lambda m: "".join(latin_letter(c) for c in m[0]), text)
+    for symbol, word in SYMBOL_WORDS.items():
+        text = text.replace(symbol, f" {word} ")
+    text = text.replace("*", " ")
+    # „…“ — пара (у нас «“» в ней закрывающая), “…” — тоже пара; одиночные — по направлению.
+    text = re.sub(r"„([^“”„]*)[“”]", r"«\1»", text)
+    text = re.sub(r"“([^”“]*)”", r"«\1»", text)
+    text = text.translate(str.maketrans({"“": "«", "„": "«", "‹": "«", "”": "»", "›": "»"}))
+    text = re.sub(rf"\s*[{re.escape(OPEN_BRACKETS)}]\s*", ", скобка открывается, ", text)
+    text = re.sub(rf"\s*[{re.escape(CLOSE_BRACKETS)}]\s*", ", скобка закрывается, ", text)
+    # «(Примечание автора.) Дальше» → «…автора, скобка закрывается. Дальше»: конец фразы
+    # внутри скобок переносим за слова о скобке, иначе вышло бы «автора., скобка».
+    text = re.sub(r"([.!?…]+)\s*,\s*скобка закрывается\s*,?\s*", r", скобка закрывается\1 ", text)
+    text = re.sub(r"([.!?…])\s*,\s*(?=скобка открывается)", r"\1 ", text)     # «См. (…)», не «См.,»
+    # Запятые, которые дали скобки, не должны слипаться с соседней пунктуацией.
+    text = re.sub(r"(?:\s*,)+\s*(?=[,.!?…;:»])", "", text)
+    text = re.sub(r"(?<=[«])\s*,\s*", "", text)
+    text = re.sub(r"^\s*,\s*", "", text)
+    text = re.sub(r"\s*,\s*$", "", text)
+    text = re.sub(r"\s+,", ",", text)
+    return re.sub(r"\s{2,}", " ", text).strip()
