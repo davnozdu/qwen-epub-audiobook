@@ -98,6 +98,75 @@ def read_source(path):
             "chapters": chapters, "paragraphs": paragraphs}
 
 
+COVER_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp"}
+
+
+def find_cover(path):
+    """Обложка исходного EPUB: (байты, media-type) или None.
+
+    Ищем так же, как читалки: EPUB 3 — item с properties="cover-image"; EPUB 2 —
+    <meta name="cover" content="id">; затем <guide><reference type="cover"> (картинка или
+    страница с <img>); в крайнем случае картинка, у которой «cover» в id или имени файла.
+    """
+    with zipfile.ZipFile(path) as archive:
+        container = ET.fromstring(archive.read("META-INF/container.xml"))
+        opf_name = next((e.attrib["full-path"] for e in container.iter() if e.tag.endswith("}rootfile")), None)
+        if not opf_name:
+            return None
+        opf = ET.fromstring(archive.read(opf_name))
+        items = [e for e in opf.iter() if e.tag.endswith("}item")]
+        by_id = {e.get("id"): e for e in items}
+        images = [e for e in items if e.get("media-type") in COVER_TYPES]
+
+        def image(item):
+            name = member(opf_name, item.get("href", ""))
+            if item.get("media-type") in COVER_TYPES and name in archive.namelist():
+                return archive.read(name), item.get("media-type")
+            return None
+
+        candidates = [e for e in images if "cover-image" in (e.get("properties") or "").split()]
+        candidates += [by_id[m.get("content")] for m in opf.iter()
+                       if m.tag.endswith("}meta") and m.get("name") == "cover" and m.get("content") in by_id]
+        for item in candidates:
+            found = image(item)
+            if found:
+                return found
+        for reference in (e for e in opf.iter() if e.tag.endswith("}reference") and e.get("type") == "cover"):
+            name = member(opf_name, reference.get("href", ""))
+            if name not in archive.namelist():
+                continue
+            direct = next((e for e in images if member(opf_name, e.get("href", "")) == name), None)
+            if direct is not None:
+                return image(direct)
+            page = archive.read(name).decode("utf-8", "replace")
+            source = re.search(r"<(?:\w+:)?(?:img|image)\b[^>]*?(?:src|xlink:href|href)\s*=\s*[\"']([^\"']+)", page)
+            if source:
+                target = member(name, source.group(1))
+                item = next((e for e in images if member(opf_name, e.get("href", "")) == target), None)
+                if item is not None:
+                    return image(item)
+        for item in images:
+            if "cover" in (item.get("id") or "").lower() or "cover" in PurePosixPath(item.get("href", "")).name.lower():
+                return image(item)
+    return None
+
+
+def export_cover(book, out):
+    """Кладёт обложку книги рядом с манифестом; возвращает описание для manifest.book или None."""
+    if not book or not Path(book).is_file():
+        return None
+    found = find_cover(book)
+    if not found:
+        return None
+    data, media_type = found
+    name = "cover" + COVER_TYPES[media_type]
+    for stale in Path(out).glob("cover.*"):
+        if stale.name != name:
+            stale.unlink()
+    (Path(out) / name).write_bytes(data)
+    return {"file": name, "media_type": media_type, "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def cast_prompt(source):
     text = "\n".join(f"[{p['id']}] {p['text']}" for p in source["paragraphs"])
     return """Ты режиссёр аудиокниги. Найди ВСЕХ говорящих в полном тексте, в том числе
@@ -399,7 +468,12 @@ def export_project(out, source, cast, labels, args):
              "female_voices": sum(v["voice_gender"] == "female" for v in voices),
              "review_segments": len(review), "unresolved_segments": sum(s["speaker"] is None for s in segments),
              "max_segment_chars": max(len(s["text"]) for s in segments)}
-    manifest = {"format": "qwen-audiobook-project", "version": 1, "book": {k: source[k] for k in ("title", "author", "input_sha256", "normalization")},
+    book = {k: source[k] for k in ("title", "author", "input_sha256", "normalization")}
+    # Обложка исходной книги: без неё и M4B, и read-along EPUB выходили «безликими».
+    cover = export_cover(getattr(args, "book", None), out)
+    if cover:
+        book["cover"] = cover
+    manifest = {"format": "qwen-audiobook-project", "version": 1, "book": book,
                 "models": {"design": "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", "synthesis": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"},
                 "workflow": "Generate one reference per voice with VoiceDesign; reuse create_voice_clone_prompt with Base for all its segments",
                 "llm": {"provider": "ollama", "model": args.model, "thinking": not args.no_think},

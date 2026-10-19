@@ -6,9 +6,11 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import shutil
 import gc
@@ -58,7 +60,13 @@ BASE_REVISION = "e7dd0585652209fa0d7783659aad4e8a324de11c"
 RAB_REFERENCE_TEXT = "Сегодня тихое утро. Я спокойно и ясно читаю эту книгу."
 
 
-def rab_chunks(text):
+# Группа синтеза — до 260 знаков текста книги (~20 с) — один вызов модели. Делить её по 250 значило
+# бы отрезать от 255-знаковой склейки хвост «Он сел.» и снова отдать модели два слова. Текст для
+# модели бывает длиннее текста книги (числа словами, «скобка открывается»), отсюда запас до 320.
+RAB_ONE_CALL_CHARS = 320
+
+
+def rab_chunks(text, limit=250):
     import importlib.util
     script = Path(__file__).resolve().parent / "rab/qwen_tts_stress.py"
     if not script.is_file():
@@ -66,7 +74,7 @@ def rab_chunks(text):
     spec = importlib.util.spec_from_file_location("rab_working_tts", script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.split_text(module.normalize_stress(text), 250)
+    return module.split_text(module.normalize_stress(text), limit)
 
 
 def clone_options(reference, args):
@@ -190,6 +198,140 @@ def trim_silence(audio, sample_rate, threshold_db=-48):
     return audio[first:last]
 
 
+def synthesis_groups(candidates):
+    """Подряд идущие строки одной synthesis_group → один вызов модели; [(номер, сегмент), ...].
+
+    Строка без группы (манифест, подготовленный до групп) — сама себе группа.
+    """
+    groups = []
+    for index, segment in enumerate(candidates, 1):
+        key = segment.get("synthesis_group")
+        if groups and key is not None and groups[-1][-1][1].get("synthesis_group") == key:
+            groups[-1].append((index, segment))
+        else:
+            groups.append([(index, segment)])
+    return groups
+
+
+def reference_key(reference):
+    """Чем модель на самом деле клонирует голос: WAV образца и его расшифровка."""
+    return (reference["wav_sha256"], reference["ref_text"]) if reference else None
+
+
+def join_same_reference(groups, references, minimum, maximum):
+    """Склеивает соседние группы, которые модель всё равно читает одним и тем же голосом.
+
+    В одноголосой сборке реплики (dialog) и слова автора (narrator) — разные роли с одним
+    образцом. По ролям склейка их не объединяет, и «— Да, — сказал он.» уходило бы модели
+    двумя вызовами по пять-двенадцать знаков. Здесь критерий — сам образец (WAV и текст):
+    если он один, клонирование звучит одинаково. Правило длины то же, что у нарезки: пока
+    одна из групп короче minimum и вместе не длиннее maximum. Через главу не склеиваем.
+    Строки подсветки и роли остаются прежними; на стыке монтажная пауза не нужна — её даёт
+    сама модель.
+    """
+    def size(group):
+        return len(" ".join(s["text"] for _, s in group))
+
+    result = []
+    for group in groups:
+        if result:
+            previous, first = result[-1][-1][1], group[0][1]
+            key = reference_key(references.get(previous["speaker"]))
+            if (key is not None and key == reference_key(references.get(first["speaker"]))
+                    and previous["chapter_id"] == first["chapter_id"]
+                    and min(size(result[-1]), size(group)) < minimum
+                    and size(result[-1]) + 1 + size(group) <= maximum):
+                result[-1].extend(group)
+                continue
+        result.append(list(group))
+    for group in result:
+        for _, s in group[:-1]:
+            s["pause_after_ms"] = 0
+    return result
+
+
+def group_text(group, targets):
+    """Текст группы для модели. На стыке абзацев без конечного знака ставим точку.
+
+    Заголовок «Глава первая» или строка стиха без точки, склеенные с абзацем, иначе
+    прозвучали бы одной фразой: «Глава первая Он вошёл». Точка нужна только модели —
+    текст книги и разметка не меняются.
+    """
+    parts = []
+    for position, ((_, segment), target) in enumerate(zip(group, targets)):
+        following = group[position + 1][1] if position + 1 < len(group) else None
+        if (following is not None and following["paragraph_id"] != segment["paragraph_id"]
+                and not re.search(r"[.!?…:;,][»”\"')\]]*\s*$", target)):
+            target = target.rstrip() + "."
+        parts.append(target)
+    return " ".join(parts)
+
+
+def spoken_weight(text):
+    """Доля строки в звуке группы: по буквам и цифрам, без знаков ударения и пунктуации."""
+    return max(1, sum(c.isalnum() for c in text.replace("́", "")))
+
+
+def split_group_audio(audio, sample_rate, weights):
+    """Делит звук группы между строками по самым тихим местам рядом с ожидаемой границей.
+
+    Ожидаемая граница — пропорционально длине текста строк (речь идёт ровно, 12–13 знаков
+    в секунду); вокруг неё ищем окно с наименьшей энергией (сглаженной на 150 мс), то есть
+    естественную паузу между предложениями. Куски идут подряд и в сумме дают исходный звук.
+    """
+    import numpy as np
+    count = len(weights)
+    total = len(audio)
+    if count == 1:
+        return [audio]
+    frame = max(1, int(sample_rate * 0.01))
+    frames = max(1, -(-total // frame))
+    padded = np.zeros(frames * frame, dtype=np.float32)
+    padded[:total] = audio
+    energy = np.sqrt(np.mean(padded.reshape(frames, frame) ** 2, axis=1))
+    width = 15
+    smooth = np.convolve(energy, np.ones(width) / width, mode="same")
+    shares = np.asarray(weights, dtype=np.float64) / float(sum(weights))
+    bounds = np.cumsum(shares)[:-1] * total
+    shortest = max(1, min(int(sample_rate * 0.05), total // count))
+    cuts, previous = [], 0
+    for k, expected in enumerate(bounds, 1):
+        radius = 0.4 * min(shares[k - 1], shares[k]) * total
+        radius = min(max(radius, 0.25 * sample_rate), 1.5 * sample_rate)
+        low = max(previous + shortest, expected - radius)
+        high = min(total - (count - k) * shortest, expected + radius)
+        if high <= low:
+            cut = int(min(max(expected, previous + shortest), total - (count - k) * shortest))
+        else:
+            first, last = int(math.ceil(low / frame)), int(high // frame)
+            if last < first:
+                cut = int((low + high) / 2)
+            else:
+                window = np.arange(first, last + 1)
+                quiet = smooth[window]
+                # При равной тишине — ближе к ожидаемой границе.
+                best = window[np.lexsort((np.abs(window * frame - expected), quiet))[0]]
+                cut = int(min(max(best * frame + frame // 2, low), high))
+        cuts.append(cut)
+        previous = cut
+    return np.split(audio, cuts)
+
+
+def share_metrics(metrics, part, sample_rate, group_samples, group_size):
+    """Метрики строки из метрик группы: время синтеза и токены — пропорционально звуку."""
+    share = len(part) / group_samples if group_samples else 1 / group_size
+    result = audio_metrics(part, sample_rate)
+    result.update(synthesis_seconds=metrics["synthesis_seconds"] * share,
+                  raw_audio_seconds=metrics["raw_audio_seconds"] * share,
+                  audio_tokens=round(metrics.get("audio_tokens", 0) * share),
+                  rtf=metrics["rtf"], realtime_speed=metrics["realtime_speed"],
+                  group_size=group_size, group_audio_seconds=group_samples / sample_rate,
+                  group_synthesis_seconds=metrics["synthesis_seconds"])
+    if metrics.get("punctuation_only"):
+        result["punctuation_only"] = True
+    return result
+
+
 def audio_metrics(audio, sr):
     import numpy as np
     return {"audio_seconds": len(audio) / sr, "sample_rate": sr,
@@ -218,7 +360,8 @@ def generate_audio(model, mx, text, instruct, seed, args, reference=None):
     if reference is None:
         results = list(model.generate_voice_design(text=text, instruct=instruct, language="Russian", **options))
     else:
-        chunks = rab_chunks(text) if getattr(args, "rab_generation", False) else [text]
+        limit = 250 if len(text) > RAB_ONE_CALL_CHARS else max(250, len(text))
+        chunks = rab_chunks(text, limit) if getattr(args, "rab_generation", False) else [text]
         results = []
         for index, chunk in enumerate(chunks):
             mx.random.seed(seed + index)
@@ -390,50 +533,85 @@ def _render(args, temporary_library=None):
         # поэтому формат строки фиксированный («сегмент 412/1496 ...») и печатается на каждом
         # сегменте, включая взятые из кэша: иначе после продолжения прогона прогресс бы замер.
         total = len(candidates)
-        for index, s in enumerate(candidates, 1):
+        # Единица синтеза — группа (synthesis_group): склейка коротких предложений и абзацев
+        # одного голоса до ~220 знаков. Модель получает её одним вызовом, потому что на одно-
+        # двухсловных кусках она рвётся; звук потом делится между строками подсветки.
+        for s in candidates:
             if s["speaker"] is None or s["speaker"] not in voices:
                 raise ValueError(f"Нельзя озвучить неопределённую роль {s['id']}")
-            voice = voices[s["speaker"]]
-            target_text = speech_text(s, getattr(args, "stress_marks", "keep"))
-            reference = references[s["speaker"]] if cloning else None
+        groups = synthesis_groups(candidates)
+        if cloning and any("synthesis_group" in s for s in candidates):
+            # Манифесты без групп (подготовленные раньше) не трогаем: их кэш остаётся годным.
+            chunking = manifest.get("chunking") or {}
+            groups = join_same_reference(groups, references, int(chunking.get("min_chars", 100)),
+                                         int(chunking.get("max_chars", 260)))
+        for group in groups:
+            first = group[0][1]
+            if cloning and len({reference_key(references[s["speaker"]]) for _, s in group}) != 1:
+                raise ValueError(f"В группе синтеза {first.get('synthesis_group')} разные образцы голоса")
+            if not cloning and len({s["speaker"] for _, s in group}) != 1:
+                raise ValueError(f"В группе синтеза {first.get('synthesis_group')} смешаны голоса")
+            voice = voices[first["speaker"]]
+            targets = [speech_text(s, getattr(args, "stress_marks", "keep")) for _, s in group]
+            reference = references[first["speaker"]] if cloning else None
             seed = voice["seed"] + len(rows) + 1 if getattr(args, "rab_generation", False) else voice["seed"]
-            signature = identity([revision, str(model_path), manifest["book"]["input_sha256"],
-                                  s["text"], target_text, voice["instruct"], seed, args.temperature, args.max_tokens,
-                                  reference["wav_sha256"] if reference else None])
-            wav = out / "segments" / (s["id"] + ".wav")
-            meta = wav.with_suffix(".json")
-            cached = False
-            if not args.ephemeral_voices and wav.exists() and meta.exists():
-                previous = json.loads(meta.read_text())
-                if previous.get("signature") == signature:
+            if len(group) == 1:
+                # Подпись одиночного сегмента прежняя: кэш уже начатых книг остаётся годным.
+                signatures = [identity([revision, str(model_path), manifest["book"]["input_sha256"],
+                                        first["text"], targets[0], voice["instruct"], seed, args.temperature, args.max_tokens,
+                                        reference["wav_sha256"] if reference else None])]
+            else:
+                shared = identity(["synthesis-group-1", revision, str(model_path), manifest["book"]["input_sha256"],
+                                   [s["text"] for _, s in group], [s["speaker"] for _, s in group],
+                                   targets, voice["instruct"], seed, args.temperature,
+                                   args.max_tokens, reference["wav_sha256"] if reference else None])
+                signatures = [identity([shared, position]) for position in range(len(group))]
+            wavs = [out / "segments" / (s["id"] + ".wav") for _, s in group]
+            pieces = None
+            if not args.ephemeral_voices:
+                pieces = []
+                for wav, signature in zip(wavs, signatures):
+                    meta = wav.with_suffix(".json")
+                    previous = json.loads(meta.read_text()) if wav.exists() and meta.exists() else {}
+                    if previous.get("signature") != signature or hashlib.sha256(wav.read_bytes()).hexdigest() != previous.get("wav_sha256"):
+                        pieces = None
+                        break
                     audio, sr = sf.read(wav, dtype="float32")
-                    cached = hashlib.sha256(wav.read_bytes()).hexdigest() == previous.get("wav_sha256")
-                    if cached:
-                        metrics = previous["metrics"]
+                    pieces.append((audio, sr, previous["metrics"]))
+            cached = pieces is not None
             if not cached:
-                audio, sr, metrics = generate_audio(model, mx, target_text, voice["instruct"], seed, args, reference=reference)
-                sf.write(wav, audio, sr, subtype="PCM_16")
-                save(meta, {"signature": signature, "text": s["text"], "speaker": s["speaker"], "spoken_text": target_text,
-                            "wav_sha256": hashlib.sha256(wav.read_bytes()).hexdigest(), "metrics": metrics})
-                fresh += 1
-            if sample_rate is not None and sample_rate != sr:
-                raise ValueError("Частота WAV изменилась между фрагментами")
-            sample_rate = sr
-            offset = duration
-            duration += len(audio) / sr
-            timeline.append({"segment_id": s["id"], "paragraph_id": s["paragraph_id"], "speaker": s["speaker"],
-                             "text": s["text"], "source": s["source"], "audio_start": offset,
-                             "audio_end": duration, "needs_review": s["needs_review"]})
-            if "tts_text" in s:
-                timeline[-1].update(tts_text=s["tts_text"], spoken_text=target_text)
-            if reference:
-                timeline[-1]["reference_sha256"] = reference["wav_sha256"]
-            # Outer model silence was trimmed, so the planned montage pause is added once.
-            pause_samples = round(sr * s["pause_after_ms"] / 1000)
-            duration += pause_samples / sr
-            rows.append(dict(metrics, segment_id=s["id"], speaker=s["speaker"], cached=cached))
-            save(out / "progress.json", {"state": "generating", "audio_seconds": duration, "segments": len(rows), "last_segment": s["id"]})
-            print(f"сегмент {index}/{total} · {s['id']} {voice['name']}: {metrics['audio_seconds']:.1f}s audio / {metrics['synthesis_seconds']:.1f}s generation; sample {duration:.1f}s", flush=True)
+                audio, sr, metrics = generate_audio(model, mx, group_text(group, targets), voice["instruct"], seed, args, reference=reference)
+                if len(group) == 1:
+                    pieces = [(audio, sr, metrics)]
+                else:
+                    parts = split_group_audio(audio, sr, [spoken_weight(text) for text in targets])
+                    pieces = [(part, sr, share_metrics(metrics, part, sr, len(audio), len(group))) for part in parts]
+                for (_, s), wav, signature, target_text, (audio, sr, metrics) in zip(group, wavs, signatures, targets, pieces):
+                    sf.write(wav, audio, sr, subtype="PCM_16")
+                    save(wav.with_suffix(".json"), {"signature": signature, "text": s["text"], "speaker": s["speaker"],
+                                                    "spoken_text": target_text, "synthesis_group": s.get("synthesis_group"),
+                                                    "wav_sha256": hashlib.sha256(wav.read_bytes()).hexdigest(), "metrics": metrics})
+                fresh += len(group)
+            for (index, s), target_text, (audio, sr, metrics) in zip(group, targets, pieces):
+                if sample_rate is not None and sample_rate != sr:
+                    raise ValueError("Частота WAV изменилась между фрагментами")
+                sample_rate = sr
+                offset = duration
+                duration += len(audio) / sr
+                timeline.append({"segment_id": s["id"], "paragraph_id": s["paragraph_id"], "speaker": s["speaker"],
+                                 "text": s["text"], "source": s["source"], "audio_start": offset,
+                                 "audio_end": duration, "needs_review": s["needs_review"]})
+                if "tts_text" in s:
+                    timeline[-1].update(tts_text=s["tts_text"], spoken_text=target_text)
+                if reference:
+                    timeline[-1]["reference_sha256"] = reference["wav_sha256"]
+                # Outer model silence was trimmed, so the planned montage pause is added once.
+                # Внутри группы пауза уже есть в звуке модели, prepare ставит там 0.
+                pause_samples = round(sr * s["pause_after_ms"] / 1000)
+                duration += pause_samples / sr
+                rows.append(dict(metrics, segment_id=s["id"], speaker=s["speaker"], cached=cached))
+                save(out / "progress.json", {"state": "generating", "audio_seconds": duration, "segments": len(rows), "last_segment": s["id"]})
+                print(f"сегмент {index}/{total} · {s['id']} {voice['name']}: {metrics['audio_seconds']:.1f}s audio / {metrics['synthesis_seconds']:.1f}s generation; sample {duration:.1f}s", flush=True)
             if not args.whole_book and duration >= args.seconds:
                 break
         if not timeline:

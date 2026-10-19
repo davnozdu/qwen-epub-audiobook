@@ -196,6 +196,7 @@ def sentence_segments(manifest, sentence_ms=450, paragraph_ms=800):
                 suffixed = len(sentences) > 1 or len(source_pieces(parent)) > 1
                 row["id"] = parent["id"] + f"_s{number:03d}" if suffixed else parent["id"]
                 row["sentence_parent"] = parent["id"]
+                row["synthesis_group"] = parent["id"]
                 row["paragraph_id"] = piece["paragraph_id"]
                 row["text"] = sentence.text
                 row["source"] = dict(parent["source"], char_start=base + sentence.start,
@@ -207,16 +208,64 @@ def sentence_segments(manifest, sentence_ms=450, paragraph_ms=800):
                 result.append(row)
     for i, row in enumerate(result):
         row["pause_after_ms"] = boundary_pause(row, result[i + 1] if i + 1 < len(result) else None, sentence_ms, paragraph_ms)
-    return result
+    return seal_groups(result)
 
 
-def build_text_epub(manifest, destination):
+def piece_segments(manifest):
+    """Режим fragment: склеенный из нескольких абзацев сегмент → по строке на абзац.
+
+    Подсветка живёт внутри абзаца (один span — один <p>), поэтому склейку коротких абзацев
+    нельзя показать одним span. Строки остаются одной группой синтеза: модель всё равно
+    получает их одним вызовом, а звук делится между строками уже после синтеза.
+    """
+    result = []
+    for parent in manifest["segments"]:
+        pieces = source_pieces(parent)
+        if len(pieces) == 1:
+            row = deepcopy(parent)
+            row["synthesis_group"] = parent["id"]
+            result.append(row)
+            continue
+        for number, piece in enumerate(pieces, 1):
+            row = deepcopy(parent)
+            for key in list(row):
+                if key.startswith("tts_"):
+                    del row[key]
+            row.pop("sources", None)
+            row["id"] = parent["id"] + f"_p{number:03d}"
+            row["synthesis_group"] = parent["id"]
+            row["paragraph_id"] = piece["paragraph_id"]
+            row["text"] = piece["text"]
+            row["source"] = dict(parent["source"], char_start=piece["char_start"], char_end=piece["char_end"])
+            row["audio_file"] = "audio/" + row["id"] + ".wav"
+            result.append(row)
+    return seal_groups(result)
+
+
+def seal_groups(rows):
+    """Внутри группы синтеза паузу между строками даёт сама модель: монтажную не добавляем.
+
+    Группа — это один вызов модели (склейка до ~220 знаков); её звук режется между строками
+    по естественным паузам, и склеенные обратно куски должны дать ровно исходный звук.
+    """
+    for row, following in zip(rows, rows[1:]):
+        if row.get("synthesis_group") is not None and row.get("synthesis_group") == following.get("synthesis_group"):
+            row["pause_after_ms"] = 0
+    return rows
+
+
+def build_text_epub(manifest, destination, cover_dir=None):
     """Rebuild normalized text, paragraph boundaries and segment anchors with EbookLib."""
     book = epub.EpubBook()
     book.set_identifier("urn:sha256:" + hashlib.sha256(json.dumps(manifest["segments"], ensure_ascii=False).encode()).hexdigest())
     book.set_title(manifest["book"]["title"])
     book.set_language("ru")
     book.add_author(manifest["book"].get("author", ""))
+    cover = manifest["book"].get("cover")
+    if cover and cover_dir is not None:
+        # Только картинка с cover-image, без отдельной страницы: страница обложки не текст
+        # книги и не должна попадать в spine и в синхронизацию.
+        book.set_cover("images/" + cover["file"], (Path(cover_dir) / cover["file"]).read_bytes(), create_page=False)
     book.add_item(epub.EpubItem(uid="style", file_name="style.css", media_type="text/css",
         content=HIGHLIGHT_CSS))
     docs = []
@@ -285,6 +334,8 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
         manifest["paragraph_texts"] = {p["id"]: p["text"] for p in load(source_json)["paragraphs"] if p["id"] in selected_paragraphs}
     if highlight == "sentence":
         manifest["segments"] = sentence_segments(manifest, sentence_ms, paragraph_ms)
+    else:
+        manifest["segments"] = piece_segments(manifest)
     manifest.pop("speech_preparation", None)
     manifest["highlight_mode"] = highlight
     manifest["pause_policy"] = {"sentence_ms": sentence_ms, "paragraph_ms": paragraph_ms,
@@ -294,13 +345,23 @@ def prepare(manifest_path, out, seconds=None, timing=None, start="p00058", highl
     for i, segment in enumerate(manifest["segments"]):
         segment["order"] = i
     manifest["origin_book"] = original_book
+    cover = manifest["book"].get("cover")
+    if cover:
+        # Обложка едет вместе с подготовкой: из неё её берут и текстовый EPUB, и M4B.
+        found = Path(manifest_path).parent / cover["file"]
+        if found.is_file() and hashlib.sha256(found.read_bytes()).hexdigest() == cover["sha256"]:
+            if found.resolve() != (out / cover["file"]).resolve():
+                shutil.copyfile(found, out / cover["file"])
+        else:
+            print("Обложка не найдена рядом с манифестом — книга соберётся без неё:", found, flush=True)
+            manifest["book"].pop("cover")
     if not manifest.get("segments"):
         raise ValueError("Манифест без сегментов: нечего готовить и упаковывать")
     manifest["excerpt"] = {"target_seconds": seconds, "expected_seconds": duration,
         "duration_basis": "measured where available; remainder estimated at 14 characters per second" if end else ("measured first test" if timing else "estimated 14 characters per second"),
         "first_paragraph": manifest["segments"][0]["paragraph_id"], "last_paragraph": manifest["segments"][-1]["paragraph_id"]}
     text_epub = out / "book-text.epub"
-    build_text_epub(manifest, text_epub)
+    build_text_epub(manifest, text_epub, cover_dir=out)
     manifest["summary"] = {"segments": len(manifest["segments"]), "paragraphs": len(grouped(manifest["segments"], "paragraph_id")),
         "voices": len(manifest["voices"])}
     save(out / "manifest.json", manifest)
@@ -365,10 +426,23 @@ def package(manifest_path, audio_dir, out):
         meta.write_text("\n".join(metadata) + "\n", encoding="utf-8")
         m4b = out / "book.m4b"
         temp_m4b = Path(folder) / "book.m4b"
+        cover = manifest["book"].get("cover")
+        cover_file = Path(manifest_path).parent / cover["file"] if cover else None
+        if cover_file is not None and not cover_file.is_file():
+            raise ValueError("Обложка из манифеста пропала: " + str(cover_file))
+        artwork = []
+        if cover_file is not None:
+            # Обложка — attached_pic: её показывают плееры аудиокниг. JPEG и PNG MP4 хранит как
+            # есть, остальные форматы перекодируем в JPEG.
+            codec = "copy" if cover["media_type"] in {"image/jpeg", "image/png"} else "mjpeg"
+            artwork = ["-i", str(cover_file), "-map", "2:v:0", "-c:v", codec, "-disposition:v:0", "attached_pic"]
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(audio_dir / "sample.wav"),
-            "-f", "ffmetadata", "-i", str(meta), "-map", "0:a:0", "-map_metadata", "1", "-map_chapters", "1",
+            "-f", "ffmetadata", "-i", str(meta), *artwork[:2], "-map", "0:a:0", *artwork[2:],
+            "-map_metadata", "1", "-map_chapters", "1",
             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", str(temp_m4b)], check=True)
         probe = json.loads(subprocess.check_output([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-show_chapters", "-of", "json", str(temp_m4b)]))
+        if cover_file is not None and not any(s.get("disposition", {}).get("attached_pic") for s in probe["streams"]):
+            raise ValueError("Обложка не попала в M4B")
         probe_duration = (probe.get("format") or {}).get("duration")
         if probe_duration is None:
             raise ValueError("ffprobe не вернул длительность собранного M4B — файл повреждён")

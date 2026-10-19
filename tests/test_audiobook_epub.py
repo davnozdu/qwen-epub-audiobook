@@ -53,7 +53,10 @@ class BookTests(unittest.TestCase):
         self.assertEqual(len(manifest["segments"]), 3)
         self.assertEqual(manifest["segments"][0]["text"], "И. И. Иванов пришёл.")
         self.assertTrue(all(s["speaker"] == "narrator" for s in manifest["segments"]))
-        self.assertEqual([s["pause_after_ms"] for s in manifest["segments"]], [450, 600, 800])
+        # Предложения одного куска — одна группа синтеза: модель читает их одним вызовом,
+        # паузу между ними даёт сама, монтажная остаётся только в конце группы.
+        self.assertEqual({s["synthesis_group"] for s in manifest["segments"]}, {row["id"]})
+        self.assertEqual([s["pause_after_ms"] for s in manifest["segments"]], [0, 0, 800])
         with tempfile.TemporaryDirectory() as folder:
             a.build_text_epub(manifest, Path(folder) / "sentence.epub")
             a.validate_epub(Path(folder) / "sentence.epub", manifest)
