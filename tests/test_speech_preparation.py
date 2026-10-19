@@ -218,6 +218,40 @@ class StressTests(unittest.TestCase):
         self.assertEqual(r.speech_punctuation("—–‐‑‒−"), "")
         self.assertEqual(r.speech_punctuation("«— О, ещё бы!»"), "«О, ещё бы!»")
 
+    def test_brackets_are_spoken_and_epub_text_is_unchanged(self):
+        original = manifest()
+        original["segments"][0]["text"] = "Арина (как всегда) пришла."
+        with tempfile.TemporaryDirectory() as temp:
+            result = p.process(original, args(), Path(temp))
+        self.assertEqual(result["segments"][0]["text"], "Арина (как всегда) пришла.")
+        self.assertEqual(result["segments"][0]["tts_normalized"],
+                         "Арина, скобка открывается, как всегда, скобка закрывается, пришла.")
+        self.assertTrue(p.check(result))
+        cases = {
+            "Он вошёл (тихо).": "Он вошёл, скобка открывается, тихо, скобка закрывается.",
+            "(Примечание автора.) Дальше.": "скобка открывается, Примечание автора, скобка закрывается. Дальше.",
+            "«(шёпотом) Иди»": "«скобка открывается, шёпотом, скобка закрывается, Иди»",
+            "См. [а] и {б}.": "См. скобка открывается, а, скобка закрывается, и, скобка открывается, б, скобка закрывается.",
+        }
+        for source, spoken in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(r.speech_punctuation(source), spoken)
+
+    def test_latin_and_signs_are_read_as_russian_words(self):
+        cases = {
+            "Он сказал: Hello, world!": "Он сказал: хелло, ворлд!",
+            "Café Müller": "кафе муллер",
+            "Цена 5 % и № 7, § 3.": "Цена пять процентов и номер семь, параграф три.",
+            "Том & Джерри": "Том и Джерри",
+            "* * *": "",
+            "“ок” и „да“": "«ок» и «да»",
+            "Пётр I и Людовик XIV": "Пётр Первый и Людовик Четырнадцатый",   # римские — до латиницы
+            "Письмо: test@example.com": "Письмо: test@example.com",            # адреса не трогаем
+        }
+        for source, spoken in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(r.normalize(source, strict=False), spoken)
+
     def test_unstressed_bezo_is_valid_but_real_omissions_are_rejected(self):
         text = "Безо всяких причин."
         target = "Безо вся́ких причи́н."
