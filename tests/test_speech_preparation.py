@@ -256,13 +256,26 @@ class StressTests(unittest.TestCase):
                 self.assertEqual(result, spoken)
                 self.assertNotRegex(result, r"[^\W\d_]\u0301?[-\u2010-\u2015]")
 
+    def test_wordless_rows_are_not_emptied(self):
+        # «* * *» и одинокое тире — не речь, но пустыми их делать нельзя: подготовка речи падала
+        # («После нормализации фрагмент пуст») и книга не шла дальше ударений.
+        for source in ("* * *", "***", "—"):
+            with self.subTest(source=source):
+                self.assertEqual(r.normalize(source, strict=False), source)
+        original = manifest()
+        original["segments"][0]["text"] = "* * *"
+        with tempfile.TemporaryDirectory() as temp:
+            result = p.process(original, args(), Path(temp))
+        self.assertTrue(p.check(result))
+        self.assertEqual(r.normalize("Он (…) ушёл.", strict=False), "Он … ушёл.")   # пустые скобки — не речь
+
     def test_latin_and_signs_are_read_as_russian_words(self):
         cases = {
             "Он сказал: Hello, world!": "Он сказал: хелло, ворлд!",
             "Café Müller": "кафе муллер",
             "Цена 5 % и № 7, § 3.": "Цена пять процентов и номер семь, параграф три.",
             "Том & Джерри": "Том и Джерри",
-            "* * *": "",
+            "Сноска* к тексту": "Сноска к тексту",       # звёздочка у слова — не речь
             "“ок” и „да“": "«ок» и «да»",
             "Пётр I и Людовик XIV": "Пётр Первый и Людовик Четырнадцатый",   # римские — до латиницы
             "Письмо: test@example.com": "Письмо: test@example.com",            # адреса не трогаем

@@ -291,6 +291,7 @@ def normalize(text, strict=True, unresolved=None):
     при strict=False такое число остаётся в тексте как есть (озвучится цифрами) и попадает
     в список `unresolved`, который конвейер печатает и кладёт в манифест для ручной проверки.
     """
+    source = text
     # Keep URLs/emails/identifiers opaque rather than accidentally verbalizing them.
     protected = []
     def protect(m):
@@ -402,6 +403,10 @@ def normalize(text, strict=True, unresolved=None):
     text = speech_punctuation(re.sub(r"[ \t]+", " ", text).strip())
     for i, original in enumerate(protected):
         text = text.replace("\ue000" + chr(0xE100 + i) + "\ue001", original)
+    if not text.strip() and not any(c.isalnum() for c in source):
+        # Строка без слов («* * *», одинокое тире) — не речь: синтез даёт на ней короткую тишину и
+        # модель не зовёт. Пустой её делать нельзя — подготовка речи на пустом фрагменте падает.
+        return source.strip()
     return text
 
 
@@ -474,6 +479,9 @@ def speech_symbols(text):
     text = re.sub(r"„([^“”„]*)[“”]", r"«\1»", text)
     text = re.sub(r"“([^”“]*)”", r"«\1»", text)
     text = text.translate(str.maketrans({"“": "«", "„": "«", "‹": "«", "”": "»", "›": "»"}))
+    # Скобки вокруг пустоты («(…)», «[ ]») — не пояснение: убираем, а не проговариваем.
+    text = re.sub(rf"[{re.escape(OPEN_BRACKETS)}]([^\w{re.escape(OPEN_BRACKETS + CLOSE_BRACKETS)}]*)"
+                  rf"[{re.escape(CLOSE_BRACKETS)}]", r"\1", text)
     text = re.sub(rf"\s*[{re.escape(OPEN_BRACKETS)}]\s*", ", скобка открывается, ", text)
     text = re.sub(rf"\s*[{re.escape(CLOSE_BRACKETS)}]\s*", ", скобка закрывается, ", text)
     # «(Примечание автора.) Дальше» → «…автора, скобка закрывается. Дальше»: конец фразы

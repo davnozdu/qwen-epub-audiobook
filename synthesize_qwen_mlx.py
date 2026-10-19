@@ -263,8 +263,9 @@ def group_text(group, targets):
         if (following is not None and following["paragraph_id"] != segment["paragraph_id"]
                 and not re.search(r"[.!?…:;,][»”\"')\]]*\s*$", target)):
             target = target.rstrip() + "."
-        parts.append(target)
-    return " ".join(parts)
+        if any(c.isalnum() for c in target):      # «* * *» и одинокое тире модели не нужны
+            parts.append(target)
+    return " ".join(parts) or " ".join(targets)
 
 
 def spoken_weight(text):
