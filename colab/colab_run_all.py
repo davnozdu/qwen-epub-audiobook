@@ -372,6 +372,26 @@ def stage_manifest(args):
 
 
 # ─────────────────────────── 6. библиотека голосов ───────────────────────────
+def voice_transcript(wav):
+    """Точная расшифровка своего образца: <имя>.json с полем text или <имя>.txt рядом с WAV.
+
+    Без неё клонирование заметно хуже, а чужая расшифровка (эталонного чтеца) — ещё хуже,
+    поэтому молча подставлять её не будем.
+    """
+    sidecar, text = Path(wav).with_suffix(".json"), Path(wav).with_suffix(".txt")
+    if sidecar.is_file():
+        value = json.loads(sidecar.read_text(encoding="utf-8")).get("text", "")
+    elif text.is_file():
+        value = text.read_text(encoding="utf-8")
+    else:
+        value = ""
+    value = " ".join(value.split())
+    if not value:
+        raise SystemExit(f"для своего образца {wav} нужна точная расшифровка: положите рядом "
+                         f"{sidecar.name} с полем \"text\" или {text.name}")
+    return value
+
+
 def stage_voices(args, source):
     banner("voices", "Образец чтеца с GitHub → библиотека голосов")
     import urllib.request
@@ -381,27 +401,32 @@ def stage_voices(args, source):
     library = Path(source).parent / "voice-library"
     library.mkdir(parents=True, exist_ok=True)
     base_wav = library / "narrator.wav"
-    if not base_wav.exists():
-        local = Path(args.voice) if args.voice else Path("/content/narrator.wav")
-        if local.is_file():
-            shutil.copyfile(local, base_wav)
-            print("взят локальный образец:", local)
-        else:
+    local = Path(args.voice) if args.voice else Path("/content/narrator.wav")
+    if local.is_file():
+        # Свой образец копируем каждый раз: иначе в библиотеке остался бы образец прошлого
+        # запуска. Эталонный sha256 к нему не относится, а расшифровка — только его собственная.
+        shutil.copyfile(local, base_wav)
+        transcript = voice_transcript(local)
+        source_note = str(local)
+        print("взят свой образец:", local)
+    else:
+        if not base_wav.exists() or hashlib.sha256(base_wav.read_bytes()).hexdigest() != VOICE_SHA256:
             with urllib.request.urlopen(VOICE_URL, timeout=120) as response, base_wav.open("wb") as sink:
                 shutil.copyfileobj(response, sink, 1 << 16)
             print("образец скачан:", VOICE_URL)
-
-    digest = hashlib.sha256(base_wav.read_bytes()).hexdigest()
-    print("sha256 образца:", digest)
-    assert digest == VOICE_SHA256, "образец не совпал по sha256 — проверьте VOICE_URL / --voice"
-
-    try:
-        transcript = json.loads(urllib.request.urlopen(VOICE_META_URL, timeout=60).read().decode("utf-8"))["text"]
-    except Exception as exc:
-        transcript = ("Усмехнулся тоже и черномазый. Белокурый несколько удивился, что ему удалось "
-                      "сказать довольно, впрочем, плохой каламбур.")
-        print("сайдкар не скачался, беру расшифровку из скрипта:", exc)
+        digest = hashlib.sha256(base_wav.read_bytes()).hexdigest()
+        print("sha256 образца:", digest)
+        assert digest == VOICE_SHA256, "эталонный образец не совпал по sha256 — проверьте VOICE_URL"
+        try:
+            transcript = json.loads(urllib.request.urlopen(VOICE_META_URL, timeout=60).read().decode("utf-8"))["text"]
+        except Exception as exc:
+            transcript = ("Усмехнулся тоже и черномазый. Белокурый несколько удивился, что ему удалось "
+                          "сказать довольно, впрочем, плохой каламбур.")
+            print("сайдкар не скачался, беру расшифровку из скрипта:", exc)
+        source_note = "resources/voices/narrator.wav"
     print("расшифровка:", transcript[:60], "…")
+    import soundfile
+    info = soundfile.info(str(base_wav))
 
     # Профиль роли читаем из подготовленного манифеста: prepare перезаписал book.input_sha256 хешем
     # book-text.epub, и именно это значение synth сверяет в read_reference.
@@ -412,8 +437,8 @@ def stage_voices(args, source):
         if target != base_wav:
             shutil.copyfile(base_wav, target)          # реплики читает тот же тембр
         meta = {"profile": library_profile(voice, book_hash), "speaker": voice["id"], "name": voice["name"],
-                "ref_text": transcript, "source": "resources/voices/narrator.wav (9,4 с)",
-                "audio_seconds": 9.4, "sample_rate": 24000,
+                "ref_text": transcript, "source": source_note,
+                "audio_seconds": round(info.duration, 2), "sample_rate": info.samplerate,
                 "wav_sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
         (library / (voice["id"] + ".json")).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
         reference = read_reference(library, voice, book_hash)
@@ -438,6 +463,10 @@ def stage_prepare(args, project):
         run(cmd)
     else:
         print("нарезка уже есть:", source / "manifest.json")
+        if not any("synthesis_group" in s for s in prepared["segments"]):
+            # Не пересобираем сами: у начатой книги это обнулило бы кэш синтеза.
+            print("  подготовка старая: модель получает предложения по одному, без склейки коротких; "
+                  "чтобы включить склейку до ~220 знаков, перезапустите с --rebuild")
 
     prepared = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     # Когда озвучивается вся книга, --seconds не задан и expected_seconds пуст: считаем оценку сами
@@ -506,13 +535,15 @@ def stage_synth(args, source, library, model_dir):
                 print(f"синтез занял {time.time() - started:.0f} с; кэши MLX/CUDA: {values or '—'}")
                 break
             missing = re.search(r"environment variable (\w+) to a larger value than (\d+)", log)
+            # Повтор лечит только нехватку кэша. Любая другая ошибка повторится так же, а каждый
+            # перезапуск — это загрузка модели и прогрев: падаем сразу, с настоящей причиной.
+            if not missing:
+                raise SystemExit(f"синтез упал с кодом {code}; это не нехватка кэша MLX, повтор не поможет "
+                                 "(причина — в выводе выше)")
             if index < len(CACHE_STEPS):
-                if missing:
-                    print(f"\nсинтез упал: мало записей в {missing.group(1)} (нужно больше "
-                          f"{missing.group(2)}) — повторяю со ступенью {index + 1} "
-                          f"({'; '.join(f'{n}={v}' for n, v in CACHE_STEPS[index].items())})", flush=True)
-                else:
-                    print(f"\nсинтез упал с кодом {code} — повторяю со ступенью {index + 1}", flush=True)
+                print(f"\nсинтез упал: мало записей в {missing.group(1)} (нужно больше "
+                      f"{missing.group(2)}) — повторяю со ступенью {index + 1} "
+                      f"({'; '.join(f'{n}={v}' for n, v in CACHE_STEPS[index].items())})", flush=True)
                 continue
             raise SystemExit(f"синтез упал с кодом {code} (кэши MLX/CUDA пройдены до последней ступени)")
     else:
