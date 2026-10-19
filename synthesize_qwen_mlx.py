@@ -317,6 +317,86 @@ def split_group_audio(audio, sample_rate, weights):
     return np.split(audio, cuts)
 
 
+VOICE_FLOOR = 0.5          # ниже этого сходства с образцом — точно чужой голос
+VOICE_MARGIN = 0.1         # насколько склейка может быть хуже типичной для этой книги
+VOICE_MIN_SECONDS = 1.5    # на коротком звуке отпечаток голоса ненадёжен — не проверяем
+
+
+class VoiceGuard:
+    """Страховка от «другого голоса»: сравнивает каждую склейку с образцом.
+
+    Модель клонирует голос по образцу, но сэмплирование иногда уводит тембр — и кусок книги звучит
+    другим человеком. Эмоции и интонацию это не трогает (температура прежняя): меряем ТЕМБР тем же
+    кодировщиком голоса, которым модель сама читает образец (extract_speaker_embedding), и уехавшую
+    склейку синтезируем заново с другим зерном, оставляя самую похожую.
+
+    Порог относительный: склейка хуже типичного сходства этой книги (медиана − VOICE_MARGIN) или ниже
+    VOICE_FLOOR. Абсолютный порог без калибровки на настоящем звуке гонял бы пересинтез по кругу.
+    """
+
+    def __init__(self, model, mx, retries):
+        self.model, self.mx, self.retries = model, mx, int(retries)
+        self.references, self.seen = {}, []
+
+    @staticmethod
+    def supported(model) -> bool:
+        return getattr(model, "speaker_encoder", None) is not None and hasattr(model, "extract_speaker_embedding")
+
+    def embedding(self, audio):
+        import numpy as np
+        vector = np.asarray(self.model.extract_speaker_embedding(self.mx.array(np.asarray(audio, dtype=np.float32))),
+                            dtype=np.float32).reshape(-1)
+        return vector / (float(np.linalg.norm(vector)) + 1e-9)
+
+    def reference(self, reference):
+        key = reference["wav_sha256"]
+        if key not in self.references:
+            import numpy as np
+            from mlx_audio.utils import load_audio
+            self.references[key] = self.embedding(np.asarray(load_audio(reference["ref_audio"], sample_rate=24000)))
+        return self.references[key]
+
+    def similarity(self, audio, sample_rate, reference):
+        import numpy as np
+        if sample_rate != 24000 or len(audio) < sample_rate * VOICE_MIN_SECONDS:
+            return None
+        return float(np.dot(self.embedding(audio), self.reference(reference)))
+
+    def threshold(self) -> float:
+        import statistics
+        if len(self.seen) < 5:
+            return VOICE_FLOOR
+        return max(VOICE_FLOOR, statistics.median(self.seen) - VOICE_MARGIN)
+
+
+def guarded_generate(guard, model, mx, text, instruct, seed, args, reference):
+    """Синтез склейки со страховкой голоса: уехавший тембр — пересинтез с другим зерном."""
+    audio, sr, metrics = generate_audio(model, mx, text, instruct, seed, args, reference=reference)
+    if guard is None or reference is None:
+        return audio, sr, metrics
+    score = guard.similarity(audio, sr, reference)
+    if score is None:
+        return audio, sr, metrics
+    limit = guard.threshold()
+    best, spent, attempt = (score, audio, sr, metrics), metrics["synthesis_seconds"], 0
+    while best[0] < limit and attempt < guard.retries:
+        attempt += 1
+        print(f"голос уехал: сходство с образцом {best[0]:.2f} < {limit:.2f} — пересинтез с другим зерном "
+              f"(попытка {attempt + 1})", flush=True)
+        again = generate_audio(model, mx, text, instruct, seed + 7919 * attempt, args, reference=reference)
+        spent += again[2]["synthesis_seconds"]
+        candidate = guard.similarity(again[0], again[1], reference)
+        if candidate is not None and candidate > best[0]:
+            best = (candidate, *again)
+    score, audio, sr, metrics = best
+    # Время синтеза — честное: все попытки, иначе RTF книги выглядел бы лучше, чем был.
+    metrics = dict(metrics, synthesis_seconds=spent, rtf=spent / max(metrics["raw_audio_seconds"], 1e-9),
+                   realtime_speed=metrics["raw_audio_seconds"] / max(spent, 1e-9),
+                   voice_similarity=round(score, 4), voice_threshold=round(limit, 4), voice_attempts=attempt + 1)
+    guard.seen.append(score)
+    return audio, sr, metrics
+
+
 def share_metrics(metrics, part, sample_rate, group_samples, group_size):
     """Метрики строки из метрик группы: время синтеза и токены — пропорционально звуку."""
     share = len(part) / group_samples if group_samples else 1 / group_size
@@ -329,6 +409,9 @@ def share_metrics(metrics, part, sample_rate, group_samples, group_size):
                   group_synthesis_seconds=metrics["synthesis_seconds"])
     if metrics.get("punctuation_only"):
         result["punctuation_only"] = True
+    for key in ("voice_similarity", "voice_threshold", "voice_attempts"):
+        if key in metrics:
+            result[key] = metrics[key]
     return result
 
 
@@ -525,6 +608,10 @@ def _render(args, temporary_library=None):
             generate_audio(model, mx, "Это короткая проверка звука.", first_voice["instruct"], first_voice["seed"], args,
                            reference=references[first_voice["id"]] if cloning else None)
         warmup_seconds = time.perf_counter() - warmup_started
+        retries = int(getattr(args, "voice_retries", 2) or 0)
+        guard = VoiceGuard(model, mx, retries) if cloning and retries > 0 and VoiceGuard.supported(model) else None
+        if guard is None and cloning and retries > 0:
+            print("голос: у модели нет кодировщика голоса — сходство с образцом не проверяется", flush=True)
         timeline, rows = [], []
         duration = 0.0
         fresh = 0
@@ -579,8 +666,11 @@ def _render(args, temporary_library=None):
                     audio, sr = sf.read(wav, dtype="float32")
                     pieces.append((audio, sr, previous["metrics"]))
             cached = pieces is not None
+            if cached and guard is not None and "voice_similarity" in pieces[0][2]:
+                guard.seen.append(float(pieces[0][2]["voice_similarity"]))   # типичное сходство книги — и по кэшу
             if not cached:
-                audio, sr, metrics = generate_audio(model, mx, group_text(group, targets), voice["instruct"], seed, args, reference=reference)
+                audio, sr, metrics = guarded_generate(guard, model, mx, group_text(group, targets), voice["instruct"],
+                                                      seed, args, reference)
                 if len(group) == 1:
                     pieces = [(audio, sr, metrics)]
                 else:
@@ -635,6 +725,14 @@ def _render(args, temporary_library=None):
                         "-codec:a", "libmp3lame", "-b:a", "192k", str(mp3)], check=True)
         synthesis_seconds = sum(r["synthesis_seconds"] for r in rows)
         raw_seconds = sum(r["raw_audio_seconds"] for r in rows)
+        scores = [r["voice_similarity"] for r in rows if "voice_similarity" in r]
+        voice_check = {"enabled": guard is not None, "checked_rows": len(scores),
+                       "regenerated_rows": sum(1 for r in rows if int(r.get("voice_attempts") or 1) > 1)}
+        if scores:
+            import statistics
+            voice_check.update(median=round(statistics.median(scores), 4), min=round(min(scores), 4))
+            print(f"голос: сходство с образцом медиана {voice_check['median']:.2f}, минимум {voice_check['min']:.2f}; "
+                  f"пересинтезировано строк {voice_check['regenerated_rows']}", flush=True)
         report = dict(plan, state="complete", audio_generated=True, device_info=device_info,
                       platform=platform.platform(), python=platform.python_version(),
                       packages={p: installed_version(p) for p in ["mlx", "mlx-metal", "mlx-cuda-12", "mlx-audio", "transformers", "numpy"]},
@@ -645,7 +743,7 @@ def _render(args, temporary_library=None):
                       realtime_speed=raw_seconds / synthesis_seconds,
                       model_load_warmup_synthesis_seconds=load_seconds + warmup_seconds + synthesis_seconds,
                       current_run_wall_seconds=time.perf_counter() - started,
-                      fresh_segments=fresh, cached_segments=len(rows) - fresh,
+                      fresh_segments=fresh, cached_segments=len(rows) - fresh, voice_check=voice_check,
                       peak_mlx_memory_gb=mx.get_peak_memory() / 1e9,
                       output_files={"wav": str(combined), "mp3": str(mp3)}, segments=rows)
         save(out / "timeline.json", {"segments": timeline})
@@ -689,6 +787,8 @@ def main():
     parser.add_argument("--design-model", help="local VoiceDesign used only for missing reference voices")
     parser.add_argument("--reference-source", help="import whole voice references from a previous test directory")
     parser.add_argument("--import-only", action="store_true", help="freeze available references without GPU generation")
+    parser.add_argument("--voice-retries", type=int, default=2,
+                        help="сколько раз пересинтезировать склейку, если голос уехал от образца (0 — не проверять)")
     parser.add_argument("--ephemeral-voices", action="store_true", help="fresh explicit-gender references each run; delete them on exit; bypass segment cache")
     args = parser.parse_args()
     if args.seconds <= 0 or not 0 <= args.temperature <= 2 or args.max_tokens < 64:

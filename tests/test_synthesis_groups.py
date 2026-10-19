@@ -98,6 +98,29 @@ class FakeModel:
         yield FakeResult(np.concatenate(pieces))
 
 
+class DriftingModel(FakeModel):
+    """Модель, у которой голос в первой склейке «уезжает»: громче обычного — значит, чужой тембр.
+
+    Отпечаток голоса подделан по громкости: образец и нормальная речь — [1, 0], уехавший голос —
+    [0, 1] (сходство 0). Так видно, ЧТО страховка выбрала, а не только что она сработала.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.speaker_encoder = object()
+        self.drifted = False
+
+    def generate(self, text, **options):
+        for result in super().generate(text, **options):
+            if len(self.calls) == 2 and not self.drifted:      # первая склейка после прогрева
+                self.drifted = True
+                result.audio = result.audio * (0.6 / 0.3)
+            yield result
+
+    def extract_speaker_embedding(self, audio, sr=24000):
+        return np.array([0.0, 1.0]) if float(np.max(np.abs(audio))) > 0.45 else np.array([1.0, 0.0])
+
+
 @contextmanager
 def fake_mlx(model):
     core = ModuleType("mlx.core")
@@ -107,12 +130,16 @@ def fake_mlx(model):
         setattr(core, name, lambda *args, **kwargs: None)
     core.device_info = lambda: {"device_name": "fake"}
     core.get_peak_memory = core.get_active_memory = lambda: 0
+    core.array = lambda value: value
     mlx = ModuleType("mlx")
     mlx.core = core
     utils = ModuleType("mlx_audio.tts.utils")
     utils.load_model = lambda path: model
+    audio_utils = ModuleType("mlx_audio.utils")
+    audio_utils.load_audio = lambda path, sample_rate=24000: sf.read(str(path), dtype="float32")[0]
     names = {"mlx": mlx, "mlx.core": core, "mlx_audio": ModuleType("mlx_audio"),
-             "mlx_audio.tts": ModuleType("mlx_audio.tts"), "mlx_audio.tts.utils": utils}
+             "mlx_audio.tts": ModuleType("mlx_audio.tts"), "mlx_audio.tts.utils": utils,
+             "mlx_audio.utils": audio_utils}
     saved = {k: sys.modules.get(k) for k in names}
     sys.modules.update(names)
     try:
@@ -234,6 +261,23 @@ class PipelineTests(unittest.TestCase):
                 self.assertRegex(text, r'properties="cover-image"|name="cover"')
                 image = next(n for n in z.namelist() if n.endswith("cover.jpg"))
                 self.assertEqual(z.read(image), cover)
+
+    def test_drifted_voice_is_regenerated_and_the_matching_take_kept(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder, manifest, _ = self.build(folder, "sentence")
+            model = DriftingModel()
+            self.render(folder, model)
+            calls = model.calls[1:]                               # первый — прогрев
+            self.assertEqual(calls[0], calls[1], "уехавшую склейку синтезировали заново тем же текстом")
+            report = json.loads((folder / "audio/benchmark.json").read_text())
+            check = report["voice_check"]
+            self.assertTrue(check["enabled"])
+            self.assertGreater(check["regenerated_rows"], 0)
+            self.assertGreaterEqual(check["min"], 0.99)           # в книгу попал совпавший с образцом дубль
+            first = json.loads((folder / "audio/segments" / (manifest["segments"][0]["id"] + ".json")).read_text())
+            self.assertEqual(first["metrics"]["voice_attempts"], 2)
+            peak = float(np.max(np.abs(sf.read(folder / "audio/segments" / (manifest["segments"][1]["id"] + ".wav"))[0])))
+            self.assertLess(peak, 0.45)
 
     def test_sentence_highlight_sends_glued_text_to_model(self):
         self.check("sentence")
