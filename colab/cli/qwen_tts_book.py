@@ -464,6 +464,12 @@ def pack_raw(args, book):
                     zf.write(project / name, arcname=f"project/{name}")
             for name in ("manifest.json", "book-text.epub"):
                 zf.write(source / name, arcname=f"project/source/{name}")
+            # Обложка: на неё ссылаются оба манифеста, без неё сборка части (m4b) не начнётся.
+            for folder, prefix in ((project, "project"), (source, "project/source")):
+                cover = (json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+                         .get("book", {}).get("cover") or {}).get("file")
+                if cover and (folder / cover).is_file():
+                    zf.write(folder / cover, arcname=f"{prefix}/{cover}")
             for name in ("timeline.json", "benchmark.json"):
                 zf.write(audio / name, arcname=f"project/audio/{name}")
             for flac in sorted(flac_dir.iterdir()):

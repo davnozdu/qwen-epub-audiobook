@@ -88,7 +88,7 @@ def build_part_from_source(book_path, original, outline, source_paragraphs, chap
     import zipfile
     from copy import deepcopy
 
-    from ebooklib import ITEM_DOCUMENT, epub
+    from ebooklib import ITEM_DOCUMENT, ITEM_NAVIGATION, epub
     from lxml import etree
 
     from prepare_qwen import BLOCKS
@@ -128,7 +128,9 @@ def build_part_from_source(book_path, original, outline, source_paragraphs, chap
 
     resources = 0
     for item in original.get_items():            # обложка, шрифты, стили, картинки
-        if item.get_type() == ITEM_DOCUMENT:
+        # Родную навигацию (toc.ncx) не копируем: оглавление части строится ниже заново, и с
+        # копией в архиве оказывалось два OPS/toc.ncx — читалки берут какой попало.
+        if item.get_type() in (ITEM_DOCUMENT, ITEM_NAVIGATION):
             continue
         new.add_item(deepcopy(item))
         resources += 1

@@ -198,7 +198,16 @@ def assemble_project(parts: list, meta: dict) -> dict:
         project = load(part["project"])
         prefix = f"c{part['index']:02d}"
         chapter_map = {}
-        for chapter in project.get("chapters") or []:
+        for position, chapter in enumerate(project.get("chapters") or []):
+            previous = chapters[-1] if chapters else None
+            # Часть режется по абзацам, а не по главам: глава на стыке приходит в двух частях с
+            # тем же файлом исходника (глава = документ, так её заводит read_source). Название
+            # сравнивать нельзя: заголовок остаётся в первой части, во второй глава зовётся по
+            # имени файла. Это одна глава, а не две — название берём из первой части.
+            if (position == 0 and previous is not None and chapter.get("href")
+                    and chapter.get("href") == previous.get("href")):
+                chapter_map[chapter["id"]] = previous["id"]
+                continue
             fresh = prefix + str(chapter["id"])
             chapter_map[chapter["id"]] = fresh
             chapters.append(dict(chapter, id=fresh))
@@ -230,6 +239,28 @@ def assemble_project(parts: list, meta: dict) -> dict:
                 voices.append(voice)
     return {"book": book, "chapters": chapters, "voices": voices, "segments": segments,
             "paragraph_texts": texts}
+
+
+def attach_cover(project: dict, parts: list, book, folder) -> None:
+    """Обложка книги — из исходного epub целиком; если его нет — та, что приехала с первой частью.
+
+    Манифест книги собран из манифестов частей, а файл обложки лежит не рядом с ним: без этого
+    финал выходил бы без обложки и в m4b, и в read-along.epub.
+    """
+    from prepare_qwen import export_cover
+    project["book"].pop("cover", None)
+    cover = export_cover(book, folder) if book else None
+    if cover is None:
+        first = load(parts[0]["project"]).get("book", {}).get("cover")
+        found = parts[0]["project"].parent / first["file"] if first else None
+        if found is not None and found.is_file():
+            shutil.copyfile(found, pathlib.Path(folder) / first["file"])
+            cover = first
+    if cover:
+        project["book"]["cover"] = cover
+        print(f"  обложка: {cover['file']} ({'из исходной книги' if book else 'из первой части'})")
+    else:
+        print("  обложки нет ни в исходной книге, ни в частях — книга соберётся без неё")
 
 
 def verify_seam(whole: dict, parts: list) -> int:
@@ -399,6 +430,7 @@ def mode_final(parts: list, work, out, book, polish: str, name: str = "") -> int
     project = assemble_project(parts, meta)
     prepared_dir = work / "book"
     prepared_dir.mkdir(parents=True, exist_ok=True)
+    attach_cover(project, parts, book, prepared_dir)
     save(prepared_dir / "manifest.json", project)
     save(prepared_dir / "source.json", {"paragraphs": [{"id": pid, "text": text}
                                                        for pid, text in project["paragraph_texts"].items()]})

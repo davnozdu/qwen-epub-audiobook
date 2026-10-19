@@ -32,15 +32,19 @@ CHAPTERS = [("Первый раздел", ["Арина вошла в комна�
                                "Страницы были старые, но буквы ещё читались."])]
 
 
-def make_epub(path, title, chapters) -> pathlib.Path:
-    """Книга как её видит конвейер: главы документами, абзацы — тегами <p>."""
+def make_epub(path, title, chapters, first: int = 1) -> pathlib.Path:
+    """Книга как её видит конвейер: главы документами, абзацы — тегами <p>.
+
+    first — номер первой главы: shrink_book сохраняет имена файлов исходника, поэтому вторая
+    глава книги и в части 2 лежит в ch002.xhtml, а не в ch001.xhtml.
+    """
     from ebooklib import epub
     book = epub.EpubBook()
     book.set_identifier("urn:test:" + title)
     book.set_title(title)
     book.set_language("ru")
     docs = []
-    for index, (chapter_title, paragraphs) in enumerate(chapters, 1):
+    for index, (chapter_title, paragraphs) in enumerate(chapters, first):
         doc = epub.EpubHtml(uid=f"ch{index:03d}", file_name=f"ch{index:03d}.xhtml",
                             title=chapter_title, lang="ru")
         doc.content = ("<html><body>"
@@ -109,7 +113,7 @@ def build_part(root, index, total, title) -> float:
     """Одна часть: epub части → проектный манифест → prepare → синтез. Как на машине."""
     part = root / f"part-{index}"
     (part / "project").mkdir(parents=True, exist_ok=True)
-    epub_path = make_epub(part / f"часть-{index}.epub", title, [CHAPTERS[index - 1]])
+    epub_path = make_epub(part / f"часть-{index}.epub", title, [CHAPTERS[index - 1]], first=index)
     from build_single_voice_manifest import build
     build(str(epub_path), part / "project")
     a.prepare(part / "project" / "manifest.json", part / "project" / "source",
