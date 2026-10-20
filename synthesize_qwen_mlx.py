@@ -324,6 +324,9 @@ VOICE_FLOOR = 0.5          # ниже этого сходства с образ�
 VOICE_MARGIN = 0.1         # насколько склейка может быть хуже типичной для этой книги
 VOICE_MIN_SECONDS = 1.5    # на коротком звуке отпечаток голоса ненадёжен — не проверяем
 CLICK_QUIET_DB = -42.0     # щелчок ищем только в паузе: уровень вокруг ниже этого
+CLICK_GAP_MS = 80          # и не ближе к речи: взрыв согласной в начале слова (речь через 2–14 мс) и
+                           # конечной согласной (речь кончилась за 35–60 мс) — речь, а не щелчок
+CLICK_SPEECH_DB = 25       # речь — кадры не тише громких (95-й перцентиль) больше чем на столько дБ
 TEMPO_FAST, TEMPO_SLOW = 1.45, 0.6   # во сколько раз быстрее/медленнее типичного темпа книги — брак
 TEMPO_LIMITS = (6.0, 20.0)           # букв в секунду: за этими пределами речь не бывает
 LONG_PAUSE_SECONDS = 0.9             # пауза внутри склейки длиннее — «задумался»
@@ -332,8 +335,14 @@ STRONG_STOPS = ".!?…:;"              # здесь пауза уместна; �
 
 def find_quiet_clicks(audio, sample_rate):
     """Щелчки в паузах: короткий (≈1 мс) широкополосный всплеск в 25+ раз сильнее окружения
-    на тишине вокруг. Согласные длиннее и стоят на фоне речи — их это правило не трогает.
-    Возвращает [(начало, конец)] в отсчётах.
+    на тишине вокруг и не ближе CLICK_GAP_MS к речи с обеих сторон. Возвращает [(начало, конец)]
+    в отсчётах.
+
+    Без зазора правило ловило взрывы согласных: «п», «т», «к» после паузы — тот же короткий
+    широкополосный всплеск на тишине. На настоящих дублях модели 21 из 27 «щелчков» стояли за
+    2–14 мс до начала слова, 4 — через 35–60 мс после конца слова, и все три «щелчка» образца
+    narrator.wav — тоже начала слов: отбор дублей браковал нормальную речь, а очистка образца
+    срезала атаку согласных. Щелчок рта в настоящей паузе от речи отстоит дальше.
     """
     import numpy as np
     audio = np.asarray(audio, dtype=np.float32)
@@ -349,6 +358,7 @@ def find_quiet_clicks(audio, sample_rate):
     if not len(candidates):
         return []
     level = 20 * np.log10(np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-9)
+    speech = level > np.percentile(level, 95) - CLICK_SPEECH_DB
     events, last = [], -100
     for i in candidates:
         if np.median(level[max(0, i - 20): i + 21]) >= CLICK_QUIET_DB:
@@ -358,7 +368,13 @@ def find_quiet_clicks(audio, sample_rate):
         else:
             events[-1][1] = i
         last = i
-    return [(a * frame, (b + 1) * frame) for a, b in events]
+    kept = []
+    for a, b in events:
+        # Сам всплеск громкий, поэтому речь ищем за его пределами: CLICK_GAP_MS до и после.
+        if speech[max(0, a - CLICK_GAP_MS): max(0, a - 2)].any() or speech[b + 3: b + 3 + CLICK_GAP_MS].any():
+            continue
+        kept.append((a * frame, (b + 1) * frame))
+    return kept
 
 
 def clean_reference(audio, sample_rate):

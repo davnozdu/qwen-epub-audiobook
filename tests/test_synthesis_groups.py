@@ -229,6 +229,23 @@ class ReferenceCleaningTests(unittest.TestCase):
         self.assertTrue(np.array_equal(clean[-SR:], audio[-SR:]), "речь после паузы не тронута")
         self.assertLess(np.mean(clean != audio), 0.002)
 
+    def test_consonant_bursts_next_to_words_are_not_clicks(self):
+        """Взрыв согласной вплотную к слову («п» в начале, «т» в конце) — речь, а не щелчок: так было
+        на настоящих дублях модели (речь через 2–14 мс после «щелчка» или за 35–60 мс до него)."""
+        t = np.arange(SR) / SR
+        speech = (0.3 * np.sin(2 * np.pi * 180 * t) * np.minimum(1, np.minimum(t, 1 - t) / 0.02)).astype(np.float32)
+        for gap_ms in (3, 12):                                   # всплеск перед началом слова
+            pause = np.zeros(SR // 2, np.float32)
+            pause[-int(SR * gap_ms / 1000)] = 0.3
+            self.assertEqual(q.find_quiet_clicks(np.concatenate([speech, pause, speech]), SR), [], gap_ms)
+        for gap_ms in (40, 60):                                  # взрыв конечной согласной
+            pause = np.zeros(SR // 2, np.float32)
+            pause[int(SR * gap_ms / 1000)] = 0.3
+            self.assertEqual(q.find_quiet_clicks(np.concatenate([speech, pause, speech]), SR), [], gap_ms)
+        pause = np.zeros(SR // 2, np.float32)
+        pause[SR // 4] = 0.3                                     # посреди паузы — щелчок
+        self.assertEqual(len(q.find_quiet_clicks(np.concatenate([speech, pause, speech]), SR)), 1)
+
 
 class JoinTests(unittest.TestCase):
     def row(self, sid, speaker, text, chapter="ch1"):
