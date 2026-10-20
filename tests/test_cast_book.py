@@ -272,6 +272,37 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class CastStageTest(unittest.TestCase):
+    def test_cast_stage_runs_analysis_and_packs_voices(self):
+        """Стадия первой машины целиком (сбой на GPU был в заголовке стадии): разметка, голоса, архив."""
+        import argparse
+        import os
+        import colab_run_all
+        work = Path(tempfile.mkdtemp())
+        book = make_book(work / "book.epub")
+        real_analyze, real_design, real_model = cast_book.analyze, voice_pack.design, colab_run_all.stage_model
+        cast_book.analyze = lambda book_path, out, key, model, provider="ollama": real_analyze(
+            book_path, out, key, model, transport=fake_llm, sleep=lambda s: None, provider=provider)
+        designed = []
+        voice_pack.design = lambda cast_path, pack, design_model=None: (designed.append(design_model),
+                                                                         real_design(cast_path, pack, generate=lambda
+                                                                         text, instruct, seed: VoicePackTest.tone(None, 150 + seed % 97)))[1]
+        colab_run_all.stage_model = lambda args, repo=None, name=None, model_dir=None: str(model_dir)
+        os.environ["LLM_API_KEY"] = "k"
+        try:
+            args = argparse.Namespace(book=str(book), out=str(work / "out"), rebuild=False,
+                                      cast_zip=str(work / "out" / "book-voices.zip"))
+            target = colab_run_all.stage_cast(args)
+        finally:
+            cast_book.analyze, voice_pack.design, colab_run_all.stage_model = real_analyze, real_design, real_model
+            os.environ.pop("LLM_API_KEY", None)
+        self.assertTrue(Path(target).is_file())
+        self.assertTrue(designed and "VoiceDesign" in designed[0])
+        names = zipfile.ZipFile(target).namelist()
+        self.assertIn("cast.json", names)
+        self.assertIn("voices/petya.wav", names)
+
+
 class EndToEndRolesTest(unittest.TestCase):
     """Разметка → манифест → подготовка → стадия voices с пакетом → синтез: каждую реплику модель
     получает с образцом ИМЕННО её героя, слова автора — с образцом рассказчика."""

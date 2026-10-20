@@ -108,8 +108,10 @@ CACHE_STEPS = [_cache_env(1), _cache_env(2), _cache_env(4), {"MLX_ENABLE_CACHE_T
 
 
 def banner(step, text):
-    print(f"\n{'=' * 72}\n[{STAGES.index(step) + 1}/{len(STAGES)}] {text}\n{'=' * 72}", flush=True)
-    tg(f"⚙️[{STAGES.index(step) + 1}/{len(STAGES)}] {text}")
+    # Стадии вне основного списка (cast — первая машина многоголосой книги) печатаются по имени.
+    mark = f"{STAGES.index(step) + 1}/{len(STAGES)}" if step in STAGES else step
+    print(f"\n{'=' * 72}\n[{mark}] {text}\n{'=' * 72}", flush=True)
+    tg(f"⚙️[{mark}] {text}")
 
 
 def run(cmd, **kwargs):
