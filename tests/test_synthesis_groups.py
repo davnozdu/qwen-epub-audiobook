@@ -229,6 +229,22 @@ class ReferenceCleaningTests(unittest.TestCase):
         self.assertTrue(np.array_equal(clean[-SR:], audio[-SR:]), "речь после паузы не тронута")
         self.assertLess(np.mean(clean != audio), 0.002)
 
+    def test_swallowed_text_in_a_tiny_take_is_a_flaw(self):
+        """0,1 с звука на сотню букв (так бывало на настоящих дублях) — брак, а не «короткая склейка»."""
+        judge = q.TakeJudge(SimpleNamespace(), None, 2)
+        tiny = (0.3 * np.sin(2 * np.pi * 180 * np.arange(SR // 10) / SR)).astype(np.float32)
+        problems, _, _ = judge.judge(tiny, SR, "Только сторожевой пост на линии в полумиле от реки да часовой на мосту.", None)
+        self.assertTrue(any("проглочен" in p for p in problems), problems)
+        problems, _, _ = judge.judge(tiny, SR, "Да.", None)
+        self.assertFalse(any("проглочен" in p for p in problems), problems)
+
+    def test_tiny_take_does_not_crash_the_detector(self):
+        """Почти пустой дубль (60–120 мс) ронял проверку: окно окружения шире записи."""
+        for ms in (30, 70, 100):
+            tiny = np.zeros(SR * ms // 1000, np.float32)
+            tiny[len(tiny) // 2] = 0.3
+            self.assertEqual(q.find_quiet_clicks(tiny, SR), [])
+
     def test_consonant_bursts_next_to_words_are_not_clicks(self):
         """Взрыв согласной вплотную к слову («п» в начале, «т» в конце) — речь, а не щелчок: так было
         на настоящих дублях модели (речь через 2–14 мс после «щелчка» или за 35–60 мс до него)."""

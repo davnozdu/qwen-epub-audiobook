@@ -127,6 +127,23 @@ class SpeakersTest(unittest.TestCase):
         self.assertEqual(cast[0]["gender"], "male")
 
 
+class SampleTextTest(unittest.TestCase):
+    def test_sample_is_short_and_ends_with_a_sentence(self):
+        long_line = ("«Высвободить бы только руки, я сбросил бы петлю и прыгнул в воду. Если глубоко нырнуть, "
+                     "пули меня не достанут, я бы доплыл до берега, скрылся в лесу и пробрался домой.")
+        source = {"paragraphs": [{"id": "p00001", "text": long_line}]}
+        labels = [{"id": "p00001", "spans": [{"start": 0, "end": len(long_line), "speaker": "hero"}]}]
+        text = cast_book.excerpt(source, labels, "hero")
+        self.assertLessEqual(len(text), cast_book.SAMPLE_MAX)
+        self.assertEqual(text, "Высвободить бы только руки, я сбросил бы петлю и прыгнул в воду.")
+
+    def test_long_designed_sample_is_redone(self):
+        import numpy as np
+        seconds = voice_pack.MAX_SAMPLE_SECONDS + 3
+        audio = (0.3 * np.sin(2 * np.pi * 200 * np.arange(int(voice_pack.RATE * seconds)) / voice_pack.RATE))
+        self.assertIn("длиннее", voice_pack.plausible(audio, "а" * int(seconds * 12)))
+
+
 class ProviderTest(unittest.TestCase):
     def test_deepseek_request_and_reply(self):
         seen = []

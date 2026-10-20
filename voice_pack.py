@@ -33,6 +33,7 @@ sys.path.insert(0, str(HERE))
 
 RATE = 24000
 ATTEMPTS = 3                     # VoiceDesign вернул тишину или «проглотил» текст — другой seed
+MAX_SAMPLE_SECONDS = 10.0        # длиннее: Base из такого образца срывается (тишина, проглоченный текст)
 
 
 def log(message: str) -> None:
@@ -124,6 +125,8 @@ def plausible(samples, text: str) -> str:
         return f"слишком быстро ({rate:.0f} букв/с) — похоже, часть текста пропущена"
     if rate < 5:
         return f"слишком медленно ({rate:.0f} букв/с) — длинные паузы или лишние звуки"
+    if len(audio) / RATE > MAX_SAMPLE_SECONDS:
+        return f"образец длиннее {MAX_SAMPLE_SECONDS:g} с — из такого клонирование срывается"
     return ""
 
 

@@ -348,8 +348,8 @@ def find_quiet_clicks(audio, sample_rate):
     audio = np.asarray(audio, dtype=np.float32)
     frame = max(1, sample_rate // 1000)
     n = len(audio) // frame
-    if n < 60:
-        return []
+    if n < 120:
+        return []       # короче 0,12 с: окно окружения (81 мс) шире записи — судить не по чему
     second = np.zeros_like(audio)
     second[1:-1] = audio[2:] - 2 * audio[1:-1] + audio[:-2]
     energy = np.sqrt(np.mean(second[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-7
@@ -495,6 +495,12 @@ class TakeJudge:
         letters = sum(c.isalpha() for c in text)
         voiced, pauses = speech_shape(audio, sample_rate)
         rate = letters / voiced if voiced > 0 else None
+        seconds = len(audio) / sample_rate
+        if letters >= 25 and seconds < letters / TEMPO_LIMITS[1]:
+            # Звука меньше, чем нужно на этот текст даже при самой быстрой речи: модель его
+            # проглотила (0,1 с на сотню букв). Общая проверка темпа такой дубль не видит —
+            # она судит только склейки от 2 с.
+            problems.append(f"текст проглочен: {seconds:.1f} с на {letters} букв")
         if letters >= 25 and voiced >= 2 and rate is not None:
             low, high = self.tempo_limits()
             if rate > high:

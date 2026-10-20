@@ -733,8 +733,16 @@ def direct_voice(llm: LLM, voice: dict, others: list) -> dict:
 
 
 # ─────────────────────────────── образец текста ───────────────────────────────
-def excerpt(source: dict, labels: list, cid: str, target: int = 120) -> str:
-    """Текст образца — собственные реплики героя (~120 знаков, по границе предложения)."""
+SAMPLE_TARGET, SAMPLE_MAX = 80, 120     # знаков в тексте образца героя (≈5–8 с звука)
+
+
+def excerpt(source: dict, labels: list, cid: str, target: int = SAMPLE_TARGET) -> str:
+    """Текст образца — собственные реплики героя: ~80 знаков, не больше 120, по концу предложения.
+
+    Длинный образец ломает клонирование: на настоящих дублях Base из образцов VoiceDesign в
+    12,7–14,3 с (160 знаков) 5 дублей из 8 вышли тишиной или с проглоченным текстом, из
+    образцов тех же голосов в 4,7–5,7 с (одно предложение) — 12 из 12 нормальные.
+    """
     texts = {p["id"]: p["text"] for p in source["paragraphs"]}
     text = ""
     for label in labels:
@@ -745,20 +753,29 @@ def excerpt(source: dict, labels: list, cid: str, target: int = 120) -> str:
             if len(part) < 4 or not re.search(r"\w", part):
                 continue
             text += (" " if text else "") + part
-            if len(text) >= 150:
+            if len(text) >= SAMPLE_MAX:
                 break
-        if len(text) >= 150:
+        if len(text) >= SAMPLE_MAX:
             break
+    text = balance_quotes(text)
     if len(text) < 20:
         return "Это мой голос в этой книге. Сейчас я расскажу свою часть истории."
-    if len(text) <= target:
+    if len(text) <= SAMPLE_MAX:
         return text
-    prefix = text[:241]
-    ends = [m.end() for m in re.finditer(r"[.!?…](?:[»”\"])?(?=\s|$)", prefix) if 20 <= m.end() <= 240]
+    prefix = text[:SAMPLE_MAX + 1]
+    ends = [m.end() for m in re.finditer(r"[.!?…](?:[»”\"])?(?=\s|$)", prefix) if 20 <= m.end() <= SAMPLE_MAX]
     if ends:
-        return prefix[:min(ends, key=lambda end: abs(end - target))]
+        return balance_quotes(prefix[:min(ends, key=lambda end: abs(end - target))])
     words = text[:target].split(" ")
-    return " ".join(words[:-1]).strip(" ,;:—–") + "."
+    return balance_quotes(" ".join(words[:-1]).strip(" ,;:—–") + ".")
+
+
+def balance_quotes(text: str) -> str:
+    """Кавычка без пары (реплика взята с середины цитаты) модели не нужна — убираем непарные."""
+    for opening, closing in (("«", "»"), ("„", "“"), ("“", "”")):
+        if text.count(opening) != text.count(closing):
+            text = text.replace(opening, "").replace(closing, "")
+    return text.strip()
 
 
 # ─────────────────────────────── весь анализ ───────────────────────────────
