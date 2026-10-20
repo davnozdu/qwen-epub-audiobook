@@ -261,6 +261,13 @@ class ReferenceCleaningTests(unittest.TestCase):
         pause = np.zeros(SR // 2, np.float32)
         pause[SR // 4] = 0.3                                     # посреди паузы — щелчок
         self.assertEqual(len(q.find_quiet_clicks(np.concatenate([speech, pause, speech]), SR)), 1)
+        pause = np.zeros(SR // 2, np.float32)                    # всплеск с затухающим хвостом — выдох
+        start = SR // 4
+        tail = np.arange(int(SR * 0.06))
+        pause[start] = 0.3
+        pause[start + 1: start + 1 + len(tail)] = (0.02 * np.sin(2 * np.pi * 900 * tail / SR)
+                                                   * np.exp(-tail / (SR * 0.03))).astype(np.float32)
+        self.assertEqual(q.find_quiet_clicks(np.concatenate([speech, pause, speech]), SR), [])
 
 
 class JoinTests(unittest.TestCase):
