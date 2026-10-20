@@ -69,7 +69,9 @@ def compact_anchored_text(path, manifest):
     outside them must not split words or introduce newlines under pre-wrap CSS.
     """
     documents = {f"EPUB/{cid}.xhtml" for cid in grouped(manifest["segments"], "chapter_id")}
-    with tempfile.TemporaryDirectory(prefix="qwen-epub-text-") as folder:
+    # Временные файлы — рядом с целью: Path.replace между дисками (/tmp контейнера → том /data)
+    # падает «Invalid cross-device link».
+    with tempfile.TemporaryDirectory(prefix="qwen-epub-text-", dir=Path(path).parent) as folder:
         replacement = Path(folder) / "compact.epub"
         with zipfile.ZipFile(path) as source, zipfile.ZipFile(replacement, "w") as target:
             for info in source.infolist():
@@ -421,7 +423,8 @@ def package(manifest_path, audio_dir, out):
         end = chapters[i + 1][1] if i + 1 < len(chapters) else total
         title = next((c["title"] for c in manifest.get("chapters", []) if c["id"] == cid), manifest["book"]["title"])
         metadata.extend(["[CHAPTER]", "TIMEBASE=1/1000", f"START={round(begin * 1000)}", f"END={round(end * 1000)}", "title=" + metadata_value(title)])
-    with tempfile.TemporaryDirectory(prefix="qwen-book-package-") as folder:
+    # Рядом с результатом, а не в /tmp: в контейнере результат на томе, и replace между дисками падает.
+    with tempfile.TemporaryDirectory(prefix="qwen-book-package-", dir=out) as folder:
         meta = Path(folder) / "chapters.txt"
         meta.write_text("\n".join(metadata) + "\n", encoding="utf-8")
         m4b = out / "book.m4b"
@@ -545,7 +548,7 @@ def repair_highlighting(source, destination):
     """Repair an existing audio EPUB without touching encoded audio or timing."""
     source, destination = Path(source), Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="qwen-highlight-") as folder:
+    with tempfile.TemporaryDirectory(prefix="qwen-highlight-", dir=destination.parent) as folder:
         repaired = Path(folder) / "highlight.epub"
         with zipfile.ZipFile(source) as reader, zipfile.ZipFile(repaired, "w") as writer:
             for entry in reader.infolist():

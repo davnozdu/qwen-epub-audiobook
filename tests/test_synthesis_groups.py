@@ -346,7 +346,21 @@ class PipelineTests(unittest.TestCase):
             again = FakeModel()
             self.render(folder, again)
             self.assertEqual(len(again.calls), 1)
-            a.package(str(folder / "source/manifest.json"), str(folder / "audio"), str(folder / "result"))
+            # Как в контейнере: результат на томе /data, а /tmp на другом диске — Path.replace между
+            # ними падает «Invalid cross-device link». Упаковка не должна переносить файлы между папками.
+            import errno
+            real_replace = Path.replace
+
+            def same_disk_only(source, target):
+                if not str(Path(source).resolve()).startswith(str(Path(target).resolve().parent)):
+                    raise OSError(errno.EXDEV, "Invalid cross-device link", str(source))
+                return real_replace(source, target)
+
+            Path.replace = same_disk_only
+            try:
+                a.package(str(folder / "source/manifest.json"), str(folder / "audio"), str(folder / "result"))
+            finally:
+                Path.replace = real_replace
             import subprocess
             probe = json.loads(subprocess.check_output([a.FFPROBE, "-v", "error", "-show_streams", "-of", "json",
                                                         str(folder / "result/book.m4b")]))
