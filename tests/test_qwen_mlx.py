@@ -104,13 +104,19 @@ class AudioTests(unittest.TestCase):
             calls.append(kwargs)
             return iter([result])
         model = SimpleNamespace(generate=generate)
-        mx = SimpleNamespace(random=SimpleNamespace(seed=lambda seed: None), synchronize=lambda: None)
+        mx = SimpleNamespace(random=SimpleNamespace(seed=lambda seed: None), synchronize=lambda: None,
+                             array=lambda value: value)
         args = SimpleNamespace(temperature=0.7, max_tokens=1024)
         reference = {"ref_audio": "/saved/narrator.wav", "ref_text": "Текст образца"}
-        for text in ("Первая реплика", "Следующая реплика"):
-            q.generate_audio(model, mx, text, "Описание", 1, args, reference)
+        loads = []
+        clean = np.zeros(24000, dtype=np.float32)
+        with patch.object(q, "reference_wave", side_effect=lambda ref: loads.append(ref) or clean):
+            for text in ("Первая реплика", "Следующая реплика"):
+                q.generate_audio(model, mx, text, "Описание", 1, args, reference)
+        # Модель получает ОЧИЩЕННЫЙ образец (без щелчков в паузах), один и тот же во всех вызовах.
+        self.assertEqual(len(loads), 1)
         for call in calls:
-            self.assertEqual(call["ref_audio"], reference["ref_audio"])
+            self.assertIs(call["ref_audio"], clean)
             self.assertEqual(call["ref_text"], reference["ref_text"])
             self.assertEqual(call["lang_code"], "Russian")
             self.assertNotIn("instruct", call)

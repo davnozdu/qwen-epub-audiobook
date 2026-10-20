@@ -94,7 +94,9 @@ class FakeModel:
             if not letters:
                 continue
             t = np.arange(int(SR * 0.06 * letters)) / SR
-            pieces += [0.3 * np.sin(2 * np.pi * 220 * t).astype(np.float32), np.zeros(int(SR * 0.35), np.float32)]
+            tone = 0.3 * np.sin(2 * np.pi * 220 * t).astype(np.float32)
+            edge = np.minimum(1.0, np.minimum(t, t[-1] - t) / 0.01).astype(np.float32)   # речь не начинается ступенькой
+            pieces += [tone * edge, np.zeros(int(SR * 0.35), np.float32)]
         yield FakeResult(np.concatenate(pieces))
 
 
@@ -119,6 +121,42 @@ class DriftingModel(FakeModel):
 
     def extract_speaker_embedding(self, audio, sr=24000):
         return np.array([0.0, 1.0]) if float(np.max(np.abs(audio))) > 0.45 else np.array([1.0, 0.0])
+
+
+class FlawedFirstTake(FakeModel):
+    """Первый дубль первой склейки — с браком заданного вида, остальные — нормальные."""
+
+    def __init__(self, flaw):
+        super().__init__()
+        self.flaw, self.done = flaw, False
+
+    def generate(self, text, **options):
+        for result in super().generate(text, **options):
+            if len(self.calls) == 2 and not self.done:          # первая склейка после прогрева
+                self.done = True
+                audio = result.audio
+                if self.flaw == "click":                          # щелчок в паузе после первого предложения
+                    pause = int(np.flatnonzero(np.abs(audio) > 0)[0]) + int(SR * 0.06 * 5) + int(SR * 0.15)
+                    spot = next(i for i in range(pause, len(audio)) if np.all(audio[i - 200:i + 200] == 0))
+                    audio = audio.copy()
+                    audio[spot] = 0.4
+                elif self.flaw == "skip":                         # проглотил всё после первой трети
+                    audio = audio[: len(audio) // 3]
+                elif self.flaw == "hesitate":                     # «задумался»: каждая пауза — по 1.5 с,
+                    quiet = np.abs(audio) == 0                     # и ещё по одной посреди каждой фразы
+                    pieces, start = [], 0
+                    for edge in np.flatnonzero(np.diff(quiet.astype(np.int8)) == 1) + 1:   # начало каждой паузы
+                        sound = audio[start:edge].copy()
+                        half = len(sound) // 2
+                        fade = np.linspace(1, 0, int(SR * 0.01), dtype=np.float32)
+                        sound[half - len(fade):half] *= fade
+                        sound[half:half + len(fade)] *= fade[::-1]
+                        pieces += [sound[:half], np.zeros(int(SR * 1.5), np.float32), sound[half:],
+                                   np.zeros(int(SR * 1.5), np.float32)]
+                        start = edge
+                    audio = np.concatenate(pieces + [audio[start:]])
+                result.audio = audio
+            yield result
 
 
 @contextmanager
@@ -172,6 +210,22 @@ class SplitAudioTests(unittest.TestCase):
         parts = q.split_group_audio(audio, SR, [40, 1])
         self.assertTrue(all(len(p) > 0 for p in parts))
         self.assertEqual(sum(len(p) for p in parts), len(audio))
+
+
+@unittest.skipIf(np is None, "numpy нужен")
+class ReferenceCleaningTests(unittest.TestCase):
+    def test_click_in_a_pause_of_the_reference_is_removed_and_speech_kept(self):
+        t = np.arange(SR) / SR
+        speech = (0.3 * np.sin(2 * np.pi * 180 * t) * np.minimum(1, np.minimum(t, 1 - t) / 0.02)).astype(np.float32)
+        pause = np.zeros(SR // 2, np.float32)
+        pause[SR // 4] = 0.3                                     # щелчок губами в паузе
+        audio = np.concatenate([speech, pause, speech])
+        self.assertEqual(len(q.find_quiet_clicks(audio, SR)), 1)
+        clean = q.clean_reference(audio, SR)
+        self.assertEqual(q.find_quiet_clicks(clean, SR), [])
+        self.assertTrue(np.array_equal(clean[:SR], audio[:SR]), "речь до паузы не тронута")
+        self.assertTrue(np.array_equal(clean[-SR:], audio[-SR:]), "речь после паузы не тронута")
+        self.assertLess(np.mean(clean != audio), 0.002)
 
 
 class JoinTests(unittest.TestCase):
@@ -278,6 +332,32 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(first["metrics"]["voice_attempts"], 2)
             peak = float(np.max(np.abs(sf.read(folder / "audio/segments" / (manifest["segments"][1]["id"] + ".wav"))[0])))
             self.assertLess(peak, 0.45)
+
+    def check_flaw_retaken(self, flaw, reason):
+        with tempfile.TemporaryDirectory() as folder:
+            folder, manifest, _ = self.build(folder, "sentence")
+            model = FlawedFirstTake(flaw)
+            self.render(folder, model)
+            calls = model.calls[1:]
+            self.assertEqual(calls[0], calls[1], f"{flaw}: склейку с браком синтезировали заново")
+            first = json.loads((folder / "audio/segments" / (manifest["segments"][0]["id"] + ".json")).read_text())
+            self.assertEqual(first["metrics"]["voice_attempts"], 2, flaw)
+            self.assertEqual(first["metrics"]["take_problems"], [], f"{flaw}: в книгу пошёл дубль без брака")
+            group = [s for s in manifest["segments"] if s.get("synthesis_group") == manifest["segments"][0]["synthesis_group"]]
+            audio = np.concatenate([sf.read(folder / "audio/segments" / (s["id"] + ".wav"))[0] for s in group])
+            self.assertEqual(q.find_quiet_clicks(audio.astype(np.float32), SR), [], f"{flaw}: щелчка в книге нет")
+            log = (folder / "audio/benchmark.json").read_text()
+            self.assertIn('"regenerated_rows"', log)
+            return reason
+
+    def test_click_in_a_pause_is_retaken_not_filtered(self):
+        self.check_flaw_retaken("click", "щелчок")
+
+    def test_swallowed_text_is_retaken(self):
+        self.check_flaw_retaken("skip", "темп")
+
+    def test_hesitation_mid_phrase_is_retaken(self):
+        self.check_flaw_retaken("hesitate", "пауза")
 
     def test_sentence_highlight_sends_glued_text_to_model(self):
         self.check("sentence")

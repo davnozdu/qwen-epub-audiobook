@@ -77,16 +77,18 @@ def rab_chunks(text, limit=250):
     return module.split_text(module.normalize_stress(text), limit)
 
 
-def clone_options(reference, args):
+def clone_options(reference, args, mx=None):
     """Working rab invocation: waveform input and native MLX sampler defaults."""
+    # Модель получает образец без щелчков в паузах (clean_reference): иначе она копирует их в книгу.
+    if "ref_wave" not in reference:
+        if mx is None:
+            import mlx.core as mx
+        reference["ref_wave"] = mx.array(reference_wave(reference))
     if getattr(args, "rab_generation", False):
-        if "ref_wave" not in reference:
-            from mlx_audio.utils import load_audio
-            reference["ref_wave"] = load_audio(reference["ref_audio"], sample_rate=24000)
         return dict(ref_audio=reference["ref_wave"], ref_text=reference["ref_text"],
                     lang_code="russian", temperature=args.temperature,
                     max_tokens=args.max_tokens)
-    return dict(ref_audio=reference["ref_audio"], ref_text=reference["ref_text"],
+    return dict(ref_audio=reference["ref_wave"], ref_text=reference["ref_text"],
                 lang_code="Russian", temperature=args.temperature, max_tokens=args.max_tokens,
                 top_k=50, top_p=1.0, repetition_penalty=1.05, stream=False, verbose=False)
 
@@ -321,27 +323,125 @@ def split_group_audio(audio, sample_rate, weights):
 VOICE_FLOOR = 0.5          # ниже этого сходства с образцом — точно чужой голос
 VOICE_MARGIN = 0.1         # насколько склейка может быть хуже типичной для этой книги
 VOICE_MIN_SECONDS = 1.5    # на коротком звуке отпечаток голоса ненадёжен — не проверяем
+CLICK_QUIET_DB = -42.0     # щелчок ищем только в паузе: уровень вокруг ниже этого
+TEMPO_FAST, TEMPO_SLOW = 1.45, 0.6   # во сколько раз быстрее/медленнее типичного темпа книги — брак
+TEMPO_LIMITS = (6.0, 20.0)           # букв в секунду: за этими пределами речь не бывает
+LONG_PAUSE_SECONDS = 0.9             # пауза внутри склейки длиннее — «задумался»
+STRONG_STOPS = ".!?…:;"              # здесь пауза уместна; лишние долгие паузы сверх них — брак
 
 
-class VoiceGuard:
-    """Страховка от «другого голоса»: сравнивает каждую склейку с образцом.
+def find_quiet_clicks(audio, sample_rate):
+    """Щелчки в паузах: короткий (≈1 мс) широкополосный всплеск в 25+ раз сильнее окружения
+    на тишине вокруг. Согласные длиннее и стоят на фоне речи — их это правило не трогает.
+    Возвращает [(начало, конец)] в отсчётах.
+    """
+    import numpy as np
+    audio = np.asarray(audio, dtype=np.float32)
+    frame = max(1, sample_rate // 1000)
+    n = len(audio) // frame
+    if n < 60:
+        return []
+    second = np.zeros_like(audio)
+    second[1:-1] = audio[2:] - 2 * audio[1:-1] + audio[:-2]
+    energy = np.sqrt(np.mean(second[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-7
+    around = np.exp(np.convolve(np.log(energy), np.ones(81) / 81, mode="same"))
+    candidates = np.flatnonzero((energy / around > 25) & (energy > 0.004))
+    if not len(candidates):
+        return []
+    level = 20 * np.log10(np.sqrt(np.mean(audio[: n * frame].reshape(n, frame) ** 2, axis=1)) + 1e-9)
+    events, last = [], -100
+    for i in candidates:
+        if np.median(level[max(0, i - 20): i + 21]) >= CLICK_QUIET_DB:
+            continue                                     # на фоне речи — это звук речи, не щелчок
+        if i - last > 6:
+            events.append([i, i])
+        else:
+            events[-1][1] = i
+        last = i
+    return [(a * frame, (b + 1) * frame) for a, b in events]
 
-    Модель клонирует голос по образцу, но сэмплирование иногда уводит тембр — и кусок книги звучит
-    другим человеком. Эмоции и интонацию это не трогает (температура прежняя): меряем ТЕМБР тем же
-    кодировщиком голоса, которым модель сама читает образец (extract_speaker_embedding), и уехавшую
-    склейку синтезируем заново с другим зерном, оставляя самую похожую.
 
-    Порог относительный: склейка хуже типичного сходства этой книги (медиана − VOICE_MARGIN) или ниже
-    VOICE_FLOOR. Абсолютный порог без калибровки на настоящем звуке гонял бы пересинтез по кругу.
+def clean_reference(audio, sample_rate):
+    """Образец голоса без щелчков в паузах — то, что модель слышит как «манеру диктора».
+
+    Модель клонирует голос, продолжая образец, и вместе с тембром копирует его привычки: щелчок
+    губами в паузе у запятой в образце превращается в щелчки в паузах у знаков препинания во всей
+    книге. Поэтому чистим не готовую книгу, а сам образец — для любого образца и любой книги.
+    Щелчок в паузе уводим в тишину плавной впадиной (3 мс), остальное не трогаем.
+    """
+    import numpy as np
+    out = np.array(audio, dtype=np.float32, copy=True)
+    pad, fade = int(sample_rate * 0.002), int(sample_rate * 0.003)
+    ramp = 0.5 - 0.5 * np.cos(np.linspace(0, np.pi, fade))
+    for start, stop in find_quiet_clicks(out, sample_rate):
+        a, b = max(0, start - pad), min(len(out), stop + pad)
+        envelope = np.zeros(b - a + 2 * fade, dtype=np.float32)        # в паузе вокруг и так тишина
+        envelope[:fade] = 1 - ramp
+        envelope[-fade:] = ramp
+        lo, hi = a - fade, b + fade
+        window = slice(max(0, lo), min(len(out), hi))
+        out[window] *= envelope[max(0, -lo): len(envelope) - max(0, hi - len(out))]
+    return out
+
+
+def reference_wave(reference):
+    """Очищенный образец (один раз на образец): его получает и модель, и проверка голоса."""
+    if "clean_wave" not in reference:
+        import numpy as np
+        from mlx_audio.utils import load_audio
+        raw = np.asarray(load_audio(reference["ref_audio"], sample_rate=24000), dtype=np.float32)
+        clean = clean_reference(raw, 24000)
+        reference["clean_wave"] = clean
+        reference["reference_clicks_removed"] = len(find_quiet_clicks(raw, 24000))
+        if reference["reference_clicks_removed"]:
+            print(f"образец {Path(reference['ref_audio']).name}: убрал щелчков в паузах — "
+                  f"{reference['reference_clicks_removed']}", flush=True)
+    return reference["clean_wave"]
+
+
+def speech_shape(audio, sample_rate):
+    """Сколько длится речь (без краёв) и сколько в ней долгих пауз."""
+    import numpy as np
+    window = max(1, int(sample_rate * 0.01))
+    n = len(audio) // window
+    if n < 10:
+        return 0.0, 0
+    level = 20 * np.log10(np.sqrt(np.mean(np.asarray(audio[: n * window], dtype=np.float32).reshape(n, window) ** 2,
+                                          axis=1)) + 1e-9)
+    voiced = level > max(np.percentile(level, 95) - 35, -60)
+    idx = np.flatnonzero(voiced)
+    if not len(idx):
+        return 0.0, 0
+    inner = voiced[idx[0]: idx[-1] + 1]
+    pauses, run = 0, 0
+    for flag in list(inner) + [True]:
+        if not flag:
+            run += 1
+        else:
+            if run * 0.01 >= LONG_PAUSE_SECONDS:
+                pauses += 1
+            run = 0
+    return (idx[-1] - idx[0] + 1) * 0.01, pauses
+
+
+class TakeJudge:
+    """Отбор дубля склейки ещё на генерации: брак — новый дубль с другим зерном, а не фильтр.
+
+    Брак — то, что слышно как «оборвалось и пошло дальше» или «другой голос»:
+      - щелчок в паузе (find_quiet_clicks);
+      - темп, которого у этой книги не бывает: в TEMPO_FAST раз быстрее типичного (модель
+        проглотила кусок текста) или в TEMPO_SLOW медленнее; плюс абсолютные пределы TEMPO_LIMITS;
+      - долгие (≥ LONG_PAUSE_SECONDS) паузы сверх числа мест, где пауза уместна (STRONG_STOPS) —
+        «дочитал до запятой и задумался»;
+      - тембр уехал от образца (если у модели есть кодировщик голоса).
+    Пороги темпа и голоса — по самой книге (медиана уже озвученного), поэтому подходят любой книге
+    и любому образцу. Короткие склейки (меньше 25 букв или 2 с) по темпу и паузам не судим.
     """
 
     def __init__(self, model, mx, retries):
         self.model, self.mx, self.retries = model, mx, int(retries)
-        self.references, self.seen = {}, []
-
-    @staticmethod
-    def supported(model) -> bool:
-        return getattr(model, "speaker_encoder", None) is not None and hasattr(model, "extract_speaker_embedding")
+        self.voice = getattr(model, "speaker_encoder", None) is not None and hasattr(model, "extract_speaker_embedding")
+        self.references, self.seen, self.rates = {}, [], []
 
     def embedding(self, audio):
         import numpy as np
@@ -349,52 +449,81 @@ class VoiceGuard:
                             dtype=np.float32).reshape(-1)
         return vector / (float(np.linalg.norm(vector)) + 1e-9)
 
-    def reference(self, reference):
-        key = reference["wav_sha256"]
-        if key not in self.references:
-            import numpy as np
-            from mlx_audio.utils import load_audio
-            self.references[key] = self.embedding(np.asarray(load_audio(reference["ref_audio"], sample_rate=24000)))
-        return self.references[key]
-
     def similarity(self, audio, sample_rate, reference):
         import numpy as np
-        if sample_rate != 24000 or len(audio) < sample_rate * VOICE_MIN_SECONDS:
+        if not self.voice or reference is None or sample_rate != 24000 or len(audio) < sample_rate * VOICE_MIN_SECONDS:
             return None
-        return float(np.dot(self.embedding(audio), self.reference(reference)))
+        key = reference["wav_sha256"]
+        if key not in self.references:
+            self.references[key] = self.embedding(reference_wave(reference))
+        return float(np.dot(self.embedding(audio), self.references[key]))
 
-    def threshold(self) -> float:
+    def voice_limit(self) -> float:
         import statistics
-        if len(self.seen) < 5:
-            return VOICE_FLOOR
-        return max(VOICE_FLOOR, statistics.median(self.seen) - VOICE_MARGIN)
+        return VOICE_FLOOR if len(self.seen) < 5 else max(VOICE_FLOOR, statistics.median(self.seen) - VOICE_MARGIN)
+
+    def tempo_limits(self):
+        import statistics
+        low, high = TEMPO_LIMITS
+        if len(self.rates) >= 5:
+            typical = statistics.median(self.rates)
+            low, high = max(low, typical * TEMPO_SLOW), min(high, typical * TEMPO_FAST)
+        return low, high
+
+    def judge(self, audio, sample_rate, text, reference):
+        """Оценка дубля: (список проблем, сходство голоса, темп)."""
+        problems = []
+        clicks = find_quiet_clicks(audio, sample_rate)
+        if clicks:
+            problems.append(f"щелчок в паузе ×{len(clicks)}")
+        letters = sum(c.isalpha() for c in text)
+        voiced, pauses = speech_shape(audio, sample_rate)
+        rate = letters / voiced if voiced > 0 else None
+        if letters >= 25 and voiced >= 2 and rate is not None:
+            low, high = self.tempo_limits()
+            if rate > high:
+                problems.append(f"слишком быстро ({rate:.1f} букв/с > {high:.1f}): похоже, текст проглочен")
+            elif rate < low:
+                problems.append(f"слишком медленно ({rate:.1f} букв/с < {low:.1f})")
+            allowed = sum(text.count(mark) for mark in STRONG_STOPS)
+            if pauses > allowed:
+                problems.append(f"лишние долгие паузы: {pauses} при уместных {allowed}")
+        score = self.similarity(audio, sample_rate, reference)
+        if score is not None and score < self.voice_limit():
+            problems.append(f"голос уехал: сходство с образцом {score:.2f} < {self.voice_limit():.2f}")
+        return problems, score, rate
 
 
 def guarded_generate(guard, model, mx, text, instruct, seed, args, reference):
-    """Синтез склейки со страховкой голоса: уехавший тембр — пересинтез с другим зерном."""
+    """Синтез склейки с отбором дубля: брак — пересинтез с другим зерном, в книгу — лучший дубль."""
     audio, sr, metrics = generate_audio(model, mx, text, instruct, seed, args, reference=reference)
-    if guard is None or reference is None:
+    if guard is None or metrics.get("punctuation_only"):
         return audio, sr, metrics
-    score = guard.similarity(audio, sr, reference)
-    if score is None:
-        return audio, sr, metrics
-    limit = guard.threshold()
-    best, spent, attempt = (score, audio, sr, metrics), metrics["synthesis_seconds"], 0
-    while best[0] < limit and attempt < guard.retries:
+    problems, score, rate = guard.judge(audio, sr, text, reference)
+    best, spent, attempt = (problems, score, rate, audio, sr, metrics), metrics["synthesis_seconds"], 0
+    while best[0] and attempt < guard.retries:
         attempt += 1
-        print(f"голос уехал: сходство с образцом {best[0]:.2f} < {limit:.2f} — пересинтез с другим зерном "
-              f"(попытка {attempt + 1})", flush=True)
+        print(f"брак дубля: {'; '.join(best[0])} — пересинтез с другим зерном (попытка {attempt + 1})", flush=True)
         again = generate_audio(model, mx, text, instruct, seed + 7919 * attempt, args, reference=reference)
         spent += again[2]["synthesis_seconds"]
-        candidate = guard.similarity(again[0], again[1], reference)
-        if candidate is not None and candidate > best[0]:
-            best = (candidate, *again)
-    score, audio, sr, metrics = best
+        verdict = guard.judge(again[0], again[1], text, reference)
+        # Лучше — меньше проблем; при равенстве — ближе голос.
+        if (len(verdict[0]), -(verdict[1] or 0)) < (len(best[0]), -(best[1] or 0)):
+            best = (*verdict, *again)
+    problems, score, rate, audio, sr, metrics = best
+    if problems:
+        print(f"лучший из {attempt + 1} дублей всё равно с замечанием: {'; '.join(problems)}", flush=True)
     # Время синтеза — честное: все попытки, иначе RTF книги выглядел бы лучше, чем был.
     metrics = dict(metrics, synthesis_seconds=spent, rtf=spent / max(metrics["raw_audio_seconds"], 1e-9),
                    realtime_speed=metrics["raw_audio_seconds"] / max(spent, 1e-9),
-                   voice_similarity=round(score, 4), voice_threshold=round(limit, 4), voice_attempts=attempt + 1)
-    guard.seen.append(score)
+                   voice_attempts=attempt + 1, take_problems=problems)
+    if score is not None:
+        metrics.update(voice_similarity=round(score, 4), voice_threshold=round(guard.voice_limit(), 4))
+        guard.seen.append(score)
+    if rate is not None:
+        metrics["letters_per_second"] = round(rate, 2)
+        if not any("быстро" in p or "медленно" in p for p in problems):
+            guard.rates.append(rate)
     return audio, sr, metrics
 
 
@@ -410,7 +539,7 @@ def share_metrics(metrics, part, sample_rate, group_samples, group_size):
                   group_synthesis_seconds=metrics["synthesis_seconds"])
     if metrics.get("punctuation_only"):
         result["punctuation_only"] = True
-    for key in ("voice_similarity", "voice_threshold", "voice_attempts"):
+    for key in ("voice_similarity", "voice_threshold", "voice_attempts", "take_problems", "letters_per_second"):
         if key in metrics:
             result[key] = metrics[key]
     return result
@@ -449,7 +578,7 @@ def generate_audio(model, mx, text, instruct, seed, args, reference=None):
         results = []
         for index, chunk in enumerate(chunks):
             mx.random.seed(seed + index)
-            parts = list(model.generate(text=chunk, **clone_options(reference, args)))
+            parts = list(model.generate(text=chunk, **clone_options(reference, args, mx)))
             if not parts:
                 raise ValueError("Модель не вернула аудио для части предложения")
             results.extend(parts)
@@ -610,9 +739,10 @@ def _render(args, temporary_library=None):
                            reference=references[first_voice["id"]] if cloning else None)
         warmup_seconds = time.perf_counter() - warmup_started
         retries = int(getattr(args, "voice_retries", 2) or 0)
-        guard = VoiceGuard(model, mx, retries) if cloning and retries > 0 and VoiceGuard.supported(model) else None
-        if guard is None and cloning and retries > 0:
-            print("голос: у модели нет кодировщика голоса — сходство с образцом не проверяется", flush=True)
+        guard = TakeJudge(model, mx, retries) if cloning and retries > 0 else None
+        if guard is not None and not guard.voice:
+            print("голос: у модели нет кодировщика голоса — сходство с образцом не проверяется "
+                  "(щелчки, темп и паузы проверяются)", flush=True)
         timeline, rows = [], []
         duration = 0.0
         fresh = 0
@@ -669,6 +799,8 @@ def _render(args, temporary_library=None):
             cached = pieces is not None
             if cached and guard is not None and "voice_similarity" in pieces[0][2]:
                 guard.seen.append(float(pieces[0][2]["voice_similarity"]))   # типичное сходство книги — и по кэшу
+            if cached and guard is not None and "letters_per_second" in pieces[0][2]:
+                guard.rates.append(float(pieces[0][2]["letters_per_second"]))  # и типичный темп
             if not cached:
                 audio, sr, metrics = guarded_generate(guard, model, mx, group_text(group, targets), voice["instruct"],
                                                       seed, args, reference)
@@ -728,7 +860,8 @@ def _render(args, temporary_library=None):
         raw_seconds = sum(r["raw_audio_seconds"] for r in rows)
         scores = [r["voice_similarity"] for r in rows if "voice_similarity" in r]
         voice_check = {"enabled": guard is not None, "checked_rows": len(scores),
-                       "regenerated_rows": sum(1 for r in rows if int(r.get("voice_attempts") or 1) > 1)}
+                       "regenerated_rows": sum(1 for r in rows if int(r.get("voice_attempts") or 1) > 1),
+                       "rows_left_with_problems": sum(1 for r in rows if r.get("take_problems"))}
         if scores:
             import statistics
             voice_check.update(median=round(statistics.median(scores), 4), min=round(min(scores), 4))
