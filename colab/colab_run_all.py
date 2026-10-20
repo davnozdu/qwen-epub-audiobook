@@ -537,6 +537,15 @@ def stage_stress(args, source):
     assert marks > 0, "ударения не проставились — проверьте data/stress/dictionary.json"
     sample = next(s["tts_text"] for s in prepared["segments"] if "\u0301" in s.get("tts_text", ""))
     print("пример:", sample[:110])
+    # Иностранные вставки латиницей: русское прочтение от LLM — только в тексте для модели.
+    sys.path.insert(0, str(REPO))
+    import cast_book
+    import foreign_reading
+    key = cast_book.llm_key()
+    llm = (cast_book.LLM(key, os.environ.get("LLM_MODEL", "").strip() or cast_book.MODEL,
+                         source / "llm-cache", provider=os.environ.get("LLM_PROVIDER", "ollama").strip() or "ollama")
+           if key else None)
+    foreign_reading.prepare(source / "manifest.json", llm)
     print("✓ ударения расставлены")
 
 

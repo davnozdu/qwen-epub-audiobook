@@ -1053,8 +1053,9 @@ def main() -> int:
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
         command = [colab, "exec", "-s", args.session, "-f", str(generated), "--timeout", "86400"]
-        keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") + (("LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY") if args.cast else ())
-        for key in keys:     # уведомления работают и с машины; ключ LLM — только разметке ролей
+        # Ключ LLM нужен и озвучке: прочтение иностранных вставок (и разметка ролей на первой машине).
+        keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY")
+        for key in keys:
             if os.environ.get(key):
                 command += ["--env", f"{key}={os.environ[key]}"]
         try:
