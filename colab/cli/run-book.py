@@ -760,14 +760,22 @@ def fetch_parts(colab: str, session: str, plan: dict | None, target_dir: pathlib
 
 
 def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
-                   drive_dir: str, job: pathlib.Path, shrink: dict, raw: dict = None) -> pathlib.Path:
+                   drive_dir: str, job: pathlib.Path, shrink: dict, raw: dict = None,
+                   cast: bool = False, voice_pack: str = "") -> pathlib.Path:
     """Задание уходит на машину вместе с аргументами: colab exec аргументы не передаёт."""
     args = [book_remote]
+    if cast:
+        # Первая машина многоголосой книги: только разметка ролей и образцы голосов.
+        args += ["--cast", "--no-drive", "--no-shrink"]
+    if voice_pack:
+        args += ["--voice-pack", voice_pack]
     if fragment:
         args += ["--seconds", fragment]
     if highlight:
         args += ["--highlight", highlight]
-    if raw:
+    if cast:
+        pass
+    elif raw:
         # Режим частей: только синтез, Drive не участвует, книга собирается в образе.
         args += ["--no-drive", "--no-shrink", "--raw", "--upto", "synth",
                  "--part-index", str(raw.get("part", ""))]
@@ -785,6 +793,33 @@ def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
         stream.write(head + job.read_text(encoding="utf-8"))
     print("задание с параметрами:", " ".join(args), flush=True)
     return pathlib.Path(path)
+
+
+def fetch_cast(colab, args, stem) -> int:
+    """Многоголосая книга, первая машина: забираем пакет голосов (и кэш LLM — для повтора)."""
+    target_dir = pathlib.Path(args.out_dir or downloads_dir())
+    target_dir.mkdir(parents=True, exist_ok=True)
+    cache_remote = f"/content/out/{stem}-cast-cache.zip"
+    run_quiet([colab, "download", "-s", args.session, cache_remote, str(target_dir / f"{stem}-cast-cache.zip")])
+    remote_zip = f"/content/out/{stem}-voices.zip"
+    local_zip = target_dir / f"{stem}-voices.zip"
+    downloaded = False
+    for attempt in (1, 2):
+        if run([colab, "download", "-s", args.session, remote_zip, str(local_zip)], timeout=3600).returncode == 0 \
+                and local_zip.is_file():
+            downloaded = True
+            break
+        print(f"  пакет голосов не забрался с попытки {attempt}", flush=True)
+    if not args.keep_session:
+        print("== освобождаю машину ==")
+        run_quiet([colab, "stop", "-s", args.session])
+    if not downloaded:
+        print(f"пакета голосов на машине нет: {remote_zip}")
+        notify_telegram(f"⚠️ Голоса для «{stem}» не получены — смотрите журнал.")
+        return 1
+    print(f"пакет голосов: {local_zip} ({local_zip.stat().st_size / 1e6:.1f} МБ)")
+    print(f"{sha256_of(local_zip)}  {local_zip.name}")
+    return 0
 
 
 def fetch_raw(colab, args, stem) -> int:
@@ -880,6 +915,11 @@ def main() -> int:
                         help="номер части в режиме частей")
     parser.add_argument("--parts-dir", default=os.environ.get("PARTS_DIR", ""),
                         help="куда складывать сырьё частей (том бота)")
+    parser.add_argument("--cast", action="store_true",
+                        help="многоголосая книга, первая машина: разметка ролей (LLM) и образцы голосов; "
+                             "поставщик, модель и ключ — переменные LLM_PROVIDER, LLM_MODEL, LLM_API_KEY")
+    parser.add_argument("--voice-pack", default="",
+                        help="многоголосая книга, вторая машина: пакет голосов с первой (zip)")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
                         help="если книга длиннее — задание разрежет её на части (0 — не резать)")
     parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
@@ -953,7 +993,7 @@ def main() -> int:
     stem = book.stem or "book"
     remote_book = f"/content/{stem}.epub"
     shrink = {"max_hours": args.max_hours, "dir": args.shrink_dir,
-              "off": args.no_shrink or args.parts_raw}      # в режиме частей книгу режет бот, не машина
+              "off": args.no_shrink or args.parts_raw or args.cast}      # в режиме частей книгу режет бот, не машина
 
     def fail() -> int:
         print("\n== не получилось, освобождаю машину ==")
@@ -974,7 +1014,9 @@ def main() -> int:
         return fail()
 
     drive_ok = False
-    if args.parts_raw:
+    if args.cast:
+        print("  разметка ролей и голоса: Google Drive не нужен — пакет голосов вернётся в том бота")
+    elif args.parts_raw:
         print("  режим частей: Google Drive не участвует — сырьё вернётся в том бота")
     elif not args.no_drive:
         if args.no_auto_enter:
@@ -989,13 +1031,30 @@ def main() -> int:
     if run([colab, "upload", "-s", args.session, str(book), remote_book], timeout=3600).returncode != 0:
         return fail()
 
+    remote_pack = ""
+    if args.voice_pack:
+        pack = pathlib.Path(args.voice_pack).expanduser()
+        if not pack.is_file():
+            print(f"пакета голосов нет: {pack}")
+            return fail()
+        remote_pack = f"/content/{stem}-voices.zip"
+        print(f"\n== пакет голосов на машину: {pack.name} ==")
+        if run([colab, "upload", "-s", args.session, str(pack), remote_pack], timeout=3600).returncode != 0:
+            return fail()
+    if args.cast:
+        cache = pathlib.Path(args.out_dir or downloads_dir()) / f"{stem}-cast-cache.zip"
+        if cache.is_file():                    # ответы LLM прошлой попытки: не спрашиваем заново
+            print(f"\n== кэш разметки прошлой попытки на машину: {cache.name} ==")
+            run([colab, "upload", "-s", args.session, str(cache), f"/content/{cache.name}"], timeout=3600)
     generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir,
-                               job, shrink, {"part": args.part_index} if args.parts_raw else None)
+                               job, shrink, {"part": args.part_index} if args.parts_raw else None,
+                               cast=args.cast, voice_pack=remote_pack)
     print("\n== задание ==")
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.
         command = [colab, "exec", "-s", args.session, "-f", str(generated), "--timeout", "86400"]
-        for key in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):     # уведомления работают и с машины
+        keys = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID") + (("LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY") if args.cast else ())
+        for key in keys:     # уведомления работают и с машины; ключ LLM — только разметке ролей
             if os.environ.get(key):
                 command += ["--env", f"{key}={os.environ[key]}"]
         try:
@@ -1009,6 +1068,8 @@ def main() -> int:
         print(f"== CLI вернул код {code} — это может быть таймаут ожидания кернела, а не ошибка задания")
 
     print("\n== забираю архив ==")
+    if args.cast:
+        return fetch_cast(colab, args, stem)
     if args.parts_raw:
         return fetch_raw(colab, args, stem)
     # Толстая книга режется на части ещё на машине: узнаём по плану, как называется архив.

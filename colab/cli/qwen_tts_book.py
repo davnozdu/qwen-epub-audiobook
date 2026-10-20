@@ -301,6 +301,10 @@ def run_pipeline(args, runner, book):
         command += ["--test-seconds", str(args.seconds)]
     if args.voice:
         command += ["--voice", str(args.voice)]
+    if getattr(args, "voice_pack", None):
+        command += ["--voice-pack", str(args.voice_pack)]
+    if getattr(args, "cast", False):
+        command += ["--cast-only", "--cast-zip", str(args.zip)]
     if args.local:
         command += ["--skip-install", "--skip-gpu-check"]      # на маке ничего не ставим и GPU не требуем
     banner("Конвейер: " + " ".join(str(p) for p in command))
@@ -519,6 +523,10 @@ def main():
                         help="режим частей: остановиться на синтезе и отдать СЫРЬЁ части (FLAC), "
                              "без громкости, музыки и сборки — их делает образ")
     parser.add_argument("--part-index", default="", help="номер части (только для журнала)")
+    parser.add_argument("--cast", action="store_true",
+                        help="многоголосая книга, первая машина: разметка ролей и образцы голосов")
+    parser.add_argument("--voice-pack", default=None,
+                        help="многоголосая книга, вторая машина: пакет голосов с первой")
     parser.add_argument("--upto", default="package",
                         help="остановиться на стадии конвейера (в режиме частей всегда synth)")
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)
@@ -555,6 +563,33 @@ def main():
     book = find_book(args.book)
     print("\nкнига:", book, f"{book.stat().st_size / 1e6:.2f} МБ")
     runner = ensure_runner(args.repo_url, args.repo_dir)
+
+    if args.cast:
+        # Первая машина многоголосой книги: книгу не режем (роли размечаются по всей книге,
+        # части найдут свою разметку по тексту абзацев), на выходе — архив пакета голосов.
+        cast_stem = pathlib.Path(book.name).stem or stem
+        args.out = pathlib.Path(args.out or base / cast_stem)
+        args.zip = base / f"{cast_stem}-voices.zip"
+        cache_zip = base / f"{cast_stem}-cast-cache.zip"
+        cache_dir = pathlib.Path(args.out) / "cast" / "llm-cache"
+        uploaded = pathlib.Path("/content") / cache_zip.name
+        if uploaded.is_file():               # ответы LLM прошлой попытки: не спрашиваем заново
+            import zipfile
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            with zipfile.ZipFile(uploaded) as archive:
+                archive.extractall(cache_dir)
+            print(f"  кэш LLM прошлой попытки: {len(list(cache_dir.glob('*.json')))} ответов")
+        os.environ["STEM"] = cast_stem
+        try:
+            run_pipeline(args, runner, book)
+        finally:
+            if cache_dir.is_dir():           # и при сбое: обёртка заберёт его для повтора
+                import zipfile
+                with zipfile.ZipFile(cache_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+                    for item in cache_dir.glob("*.json"):
+                        archive.write(item, item.name)
+        print(f"пакет голосов: {args.zip}")
+        return
 
     book = shrink_step(runner, book, args)
 

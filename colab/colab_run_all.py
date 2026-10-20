@@ -16,7 +16,7 @@
   2. deps     пины зависимостей (mlx[cuda] вместо mlx-metal и т.д.)
   3. repo     правки репозитория под Linux + словарь ударений на место
   4. model    веса Ru-Stress-CF (~4,5 ГБ) в локальную папку + проверка размера и состава
-  5. manifest EPUB → манифест проекта (один чтец; с OLLAMA_API_KEY — многоголосая разметка LLM)
+  5. manifest EPUB → манифест проекта (один чтец; с --voice-pack — многоголосый по готовой разметке)
   6. prepare  audiobook_epub.py prepare: нарезка по предложениям + book-text.epub
   7. stress   prepare_silero.py: словарь Supertonic + Silero (ударения как в проде)
   8. voices   образец чтеца с GitHub → библиотека голосов под ПОДГОТОВЛЕННЫЙ манифест
@@ -25,6 +25,12 @@
  10. normalize normalize_book_audio.py: громкость по LUFS + мягкая обработка речи (--polish)
  11. music    mix_book_music.py: фоновая музыка из репозитория (5 %)
  12. package  audiobook_epub.py package → book.m4b + book-read-along.epub
+
+Многоголосая книга идёт на ДВУХ машинах по очереди (бесплатно доступна одна):
+  --cast-only   первая машина: разметка ролей через LLM (cast_book.py, нужен ключ LLM) и
+                образцы голосов VoiceDesign (voice_pack.py) → архив пакета голосов (--cast-zip);
+  --voice-pack  вторая машина: обычный конвейер, но манифест — по разметке пакета, а у каждого
+                героя свой образец из пакета; рассказчик — тот же вшитый narrator.wav.
 
 Повторный запуск безопасен: готовые модели, манифест, библиотека голосов и уже синтезированные
 сегменты переиспользуются. Флаг --upto <шаг> останавливает на нужной стадии (например, --upto stress
@@ -63,6 +69,8 @@ def tg(text) -> None:
 
 MODEL_REPO = "siriusfreak/qwen3-tts-12hz-1.7b-ru-stress-cf"
 MODEL_NAME = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
+DESIGN_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"     # только для образцов героев (первая машина)
+DESIGN_NAME = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 MODEL_FILES = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
                "tokenizer.json", "vocab.json", "merges.txt", "model.safetensors", "speech_tokenizer/*"]
 VOICE_URL = "https://raw.githubusercontent.com/davnozdu/qwen-epub-audiobook/main/resources/voices/narrator.wav"
@@ -302,10 +310,12 @@ def stage_repo(args):
 
 
 # ─────────────────────────── 4. модель ───────────────────────────
-def stage_model(args):
-    banner("model", "Веса модели синтеза (≈4,5 ГБ)")
+def stage_model(args, repo=MODEL_REPO, name=MODEL_NAME, model_dir=None):
+    banner("model", "Веса модели " + ("синтеза" if repo == MODEL_REPO else "VoiceDesign") + " (≈4,5 ГБ)")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-    model_dir = Path(args.model_dir) if args.model_dir else Path(args.out) / "models" / MODEL_NAME
+    if model_dir is None:
+        model_dir = Path(args.model_dir) if args.model_dir else Path(args.out) / "models" / name
+    model_dir = Path(model_dir)
     need = ["config.json", "generation_config.json", "preprocessor_config.json", "tokenizer_config.json",
             "vocab.json", "merges.txt", "model.safetensors", "speech_tokenizer/config.json",
             "speech_tokenizer/model.safetensors"]
@@ -325,7 +335,7 @@ def stage_model(args):
             shutil.rmtree(model_dir, ignore_errors=True)
         model_dir.mkdir(parents=True, exist_ok=True)
         from huggingface_hub import snapshot_download
-        snapshot_download(MODEL_REPO, local_dir=str(model_dir), allow_patterns=MODEL_FILES, max_workers=4)
+        snapshot_download(repo, local_dir=str(model_dir), allow_patterns=MODEL_FILES, max_workers=4)
 
     files = [f for f in Path(model_dir).rglob("*") if f.is_file() and ".cache" not in f.parts]
     size = sum(f.stat().st_size for f in files)
@@ -346,11 +356,14 @@ def stage_manifest(args):
     project.mkdir(parents=True, exist_ok=True)
     manifest_path = project / "manifest.json"
 
-    key = os.environ.get("OLLAMA_API_KEY", "").strip()
     if args.rebuild or not manifest_path.exists():
-        if key:
-            print("режим: многоголосый (LLM Ollama)")
-            run([sys.executable, "prepare_qwen.py", "run", args.book, "-o", str(project)])
+        if args.voice_pack:
+            print("режим: многоголосый — разметка и образцы из пакета голосов")
+            sys.path.insert(0, str(REPO))
+            from cast_book import build_manifest
+            from voice_pack import open_pack
+            pack = open_pack(args.voice_pack, Path(args.out) / "voice-pack")
+            build_manifest(args.book, project, pack / "cast.json")
         else:
             print("режим: один чтец (без ключа; разметка проверяется валидаторами репозитория)")
             sys.path.insert(0, str(REPO))
@@ -432,8 +445,23 @@ def stage_voices(args, source):
     # book-text.epub, и именно это значение synth сверяет в read_reference.
     manifest = json.loads((Path(source) / "manifest.json").read_text(encoding="utf-8"))
     book_hash = manifest["book"]["input_sha256"]
+    pack = Path(args.out) / "voice-pack" if args.voice_pack else None
     for voice in manifest["voices"]:
         target = library / (voice["id"] + ".wav")
+        own = pack / "voices" / (voice["id"] + ".json") if pack else None
+        if own is not None and voice["id"] != "narrator":
+            # Многоголосая книга: у героя свой образец из пакета и его точный текст.
+            record = json.loads(own.read_text(encoding="utf-8"))
+            shutil.copyfile(own.with_suffix(".wav"), target)
+            info_own = soundfile.info(str(target))
+            meta = {"profile": library_profile(voice, book_hash), "speaker": voice["id"], "name": voice["name"],
+                    "ref_text": record["ref_text"], "source": "пакет голосов (VoiceDesign)",
+                    "audio_seconds": round(info_own.duration, 2), "sample_rate": info_own.samplerate,
+                    "wav_sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
+            (library / (voice["id"] + ".json")).write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+            reference = read_reference(library, voice, book_hash)
+            print(f"  {voice['id']:22s} образец из пакета: {len(reference['ref_text'])} знаков текста")
+            continue
         if target != base_wav:
             shutil.copyfile(base_wav, target)          # реплики читает тот же тембр
         meta = {"profile": library_profile(voice, book_hash), "speaker": voice["id"], "name": voice["name"],
@@ -607,6 +635,39 @@ def stage_package(args, source, with_music):
     print("✓ готово")
 
 
+def stage_cast(args):
+    """Первая машина многоголосой книги: разметка ролей (LLM) и образцы голосов → архив пакета."""
+    banner("cast", "Разметка ролей через LLM и образцы голосов VoiceDesign")
+    sys.path.insert(0, str(REPO))
+    import cast_book
+    import voice_pack
+    work = Path(args.out) / "cast"
+    provider = os.environ.get("LLM_PROVIDER", "ollama").strip() or "ollama"
+    if not cast_book.llm_key():
+        raise SystemExit("нет ключа LLM (LLM_API_KEY) — без него роли не разметить (ключ задаётся в настройках бота)")
+    cast_path = work / "cast.json"
+    if args.rebuild or not cast_path.exists():
+        tg("🎭 Разметка ролей: LLM читает книгу и находит героев…")
+        cast_book.analyze(args.book, work, cast_book.llm_key(),
+                          os.environ.get("LLM_MODEL", "").strip() or cast_book.MODEL, provider=provider)
+    else:
+        print("разметка уже есть:", cast_path)
+    cast = json.loads(cast_path.read_text(encoding="utf-8"))
+    heroes = [v for v in cast["voices"] if not v.get("fixed")]
+    tg(f"🎭 Героев с репликами: {len(heroes)} — создаю их голоса")
+    pack = Path(args.out) / "voice-pack"
+    if heroes:
+        design_dir = stage_model(args, DESIGN_REPO, DESIGN_NAME, Path(args.out) / "models" / DESIGN_NAME)
+        voice_pack.design(cast_path, pack, design_model=design_dir)
+    else:
+        (pack / "voices").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(cast_path, pack / "cast.json")
+        print("героев с репликами нет: книгу читает один рассказчик")
+    target = voice_pack.zip_pack(pack, args.cast_zip or Path(args.out) / "voices.zip")
+    print(f"✓ пакет голосов: {target} ({target.stat().st_size / 1e6:.1f} МБ)")
+    return target
+
+
 def main():
     parser = argparse.ArgumentParser(description="EPUB → M4B + read-along EPUB, весь пайплайн одним файлом",
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -624,6 +685,11 @@ def main():
     parser.add_argument("--upto", choices=STAGES, default="package", help="остановиться на этой стадии")
     parser.add_argument("--rebuild", action="store_true", help="пересобрать манифест/аудио, даже если готово")
     parser.add_argument("--skip-install", action="store_true", help="не ставить зависимости")
+    parser.add_argument("--voice-pack", default=None,
+                        help="многоголосая книга: пакет голосов (zip или папка) с первой машины")
+    parser.add_argument("--cast-only", action="store_true",
+                        help="первая машина многоголосой книги: только разметка ролей и образцы голосов")
+    parser.add_argument("--cast-zip", default=None, help="куда положить архив пакета голосов (--cast-only)")
     parser.add_argument("--skip-gpu-check", action="store_true",
                         help="не требовать GPU (для локальной проверки шагов до синтеза)")
     args = parser.parse_args()
@@ -643,6 +709,10 @@ def main():
         stage_deps(args)
     if limit >= STAGES.index("repo"):
         stage_repo(args)
+    if args.cast_only:
+        stage_cast(args)
+        print(f"\nразметка и голоса готовы за {time.time() - started:.0f} с")
+        return
     if limit >= STAGES.index("model"):
         model_dir = stage_model(args)
     if limit >= STAGES.index("manifest"):
