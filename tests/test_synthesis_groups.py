@@ -140,6 +140,8 @@ class FlawedFirstTake(FakeModel):
                     spot = next(i for i in range(pause, len(audio)) if np.all(audio[i - 200:i + 200] == 0))
                     audio = audio.copy()
                     audio[spot] = 0.4
+                elif self.flaw == "silence":                      # дубль не получился: одна тишина
+                    audio = np.zeros_like(audio)
                 elif self.flaw == "skip":                         # проглотил всё после первой трети
                     audio = audio[: len(audio) // 3]
                 elif self.flaw == "hesitate":                     # «задумался»: каждая пауза — по 1.5 с,
@@ -352,6 +354,9 @@ class PipelineTests(unittest.TestCase):
 
     def test_click_in_a_pause_is_retaken_not_filtered(self):
         self.check_flaw_retaken("click", "щелчок")
+
+    def test_silent_take_is_retaken_not_a_crash(self):
+        self.check_flaw_retaken("silence", "тишина")
 
     def test_swallowed_text_is_retaken(self):
         self.check_flaw_retaken("skip", "темп")

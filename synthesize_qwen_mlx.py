@@ -494,29 +494,58 @@ class TakeJudge:
         return problems, score, rate
 
 
+# Дубль, который не получился вовсе: модель вернула тишину или пустоту, упёрлась в лимит токенов.
+# Это не авария книги, а такой же неудачный дубль: повторяем с другим зерном.
+FAILED_TAKE = ("Модель вернула тишину", "Модель не вернула аудио", "Пустое/нечисловое аудио",
+               "Достигнут лимит аудиотокенов")
+
+
 def guarded_generate(guard, model, mx, text, instruct, seed, args, reference):
-    """Синтез склейки с отбором дубля: брак — пересинтез с другим зерном, в книгу — лучший дубль."""
-    audio, sr, metrics = generate_audio(model, mx, text, instruct, seed, args, reference=reference)
-    if guard is None or metrics.get("punctuation_only"):
-        return audio, sr, metrics
-    problems, score, rate = guard.judge(audio, sr, text, reference)
-    best, spent, attempt = (problems, score, rate, audio, sr, metrics), metrics["synthesis_seconds"], 0
-    while best[0] and attempt < guard.retries:
-        attempt += 1
-        print(f"брак дубля: {'; '.join(best[0])} — пересинтез с другим зерном (попытка {attempt + 1})", flush=True)
-        again = generate_audio(model, mx, text, instruct, seed + 7919 * attempt, args, reference=reference)
-        spent += again[2]["synthesis_seconds"]
-        verdict = guard.judge(again[0], again[1], text, reference)
+    """Синтез склейки с отбором дубля: брак — пересинтез с другим зерном, в книгу — лучший дубль.
+
+    Неудавшийся дубль (тишина, пустота, лимит токенов) тоже пересинтезируется в тех же пределах;
+    книга падает, только если не удался ни один дубль.
+    """
+    retries = int(guard.retries) if guard is not None else 2
+    best, spent, failure, takes = None, 0.0, None, 0
+    for attempt in range(retries + 1):
+        takes = attempt + 1
+        started = time.perf_counter()
+        try:
+            audio, sr, metrics = generate_audio(model, mx, text, instruct, seed + 7919 * attempt, args,
+                                                reference=reference)
+        except ValueError as exc:
+            if not str(exc).startswith(FAILED_TAKE):
+                raise
+            spent += time.perf_counter() - started
+            failure = str(exc)
+            if attempt < retries:
+                print(f"дубль не получился: {failure} — пересинтез с другим зерном (попытка {attempt + 2})",
+                      flush=True)
+            continue
+        spent += metrics["synthesis_seconds"]
+        if guard is None or metrics.get("punctuation_only"):
+            if attempt == 0:
+                return audio, sr, metrics
+            return audio, sr, dict(metrics, synthesis_seconds=spent, voice_attempts=takes)
+        verdict = guard.judge(audio, sr, text, reference)
         # Лучше — меньше проблем; при равенстве — ближе голос.
-        if (len(verdict[0]), -(verdict[1] or 0)) < (len(best[0]), -(best[1] or 0)):
-            best = (*verdict, *again)
+        if best is None or (len(verdict[0]), -(verdict[1] or 0)) < (len(best[0]), -(best[1] or 0)):
+            best = (*verdict, audio, sr, metrics)
+        if not verdict[0]:
+            break
+        if attempt < retries:
+            print(f"брак дубля: {'; '.join(verdict[0])} — пересинтез с другим зерном (попытка {attempt + 2})",
+                  flush=True)
+    if best is None:
+        raise ValueError(f"{failure} (дублей: {takes})")
     problems, score, rate, audio, sr, metrics = best
     if problems:
-        print(f"лучший из {attempt + 1} дублей всё равно с замечанием: {'; '.join(problems)}", flush=True)
+        print(f"лучший из {takes} дублей всё равно с замечанием: {'; '.join(problems)}", flush=True)
     # Время синтеза — честное: все попытки, иначе RTF книги выглядел бы лучше, чем был.
     metrics = dict(metrics, synthesis_seconds=spent, rtf=spent / max(metrics["raw_audio_seconds"], 1e-9),
                    realtime_speed=metrics["raw_audio_seconds"] / max(spent, 1e-9),
-                   voice_attempts=attempt + 1, take_problems=problems)
+                   voice_attempts=takes, take_problems=problems)
     if score is not None:
         metrics.update(voice_similarity=round(score, 4), voice_threshold=round(guard.voice_limit(), 4))
         guard.seen.append(score)
