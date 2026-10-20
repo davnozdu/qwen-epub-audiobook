@@ -192,12 +192,13 @@ def ensure_runner(repo_url, repo_dir):
         # правки всё равно накладываются заново на каждом прогоне.
         subprocess.run(["git", "-C", str(repo_dir), "fetch", "-q", "origin"], check=False)
         subprocess.run(["git", "-C", str(repo_dir), "reset", "--hard", "-q", "FETCH_HEAD"], check=False)
-        head = subprocess.run(["git", "-C", str(repo_dir), "rev-parse", "--short", "HEAD"],
-                              capture_output=True, text=True).stdout.strip()
-        print(f"  версия конвейера: {head or 'неизвестно'} (из GitHub)")
     else:
         shutil.rmtree(repo_dir, ignore_errors=True)
         subprocess.run(["git", "clone", "-q", repo_url, str(repo_dir)], check=True)
+    # Версия видна в журнале всегда: по ней понятно, вошло ли свежее исправление в этот прогон.
+    head = subprocess.run(["git", "-C", str(repo_dir), "log", "-1", "--format=%h %cd %s",
+                           "--date=format:%Y-%m-%d %H:%M"], capture_output=True, text=True).stdout.strip()
+    print(f"  версия конвейера: {head or 'неизвестно'} (из GitHub)")
     runner = repo_dir / "colab" / "colab_run_all.py"
     assert runner.is_file(), f"в клоне нет {runner}"
     print("конвейер:", runner)
