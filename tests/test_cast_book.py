@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "colab" / "cli"))
+sys.path.insert(0, str(ROOT / "colab"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cast_book  # noqa: E402
 import voice_pack  # noqa: E402
@@ -268,3 +270,67 @@ class WrapperTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndToEndRolesTest(unittest.TestCase):
+    """Разметка → манифест → подготовка → стадия voices с пакетом → синтез: каждую реплику модель
+    получает с образцом ИМЕННО её героя, слова автора — с образцом рассказчика."""
+
+    def test_each_line_is_cloned_from_its_own_speaker(self):
+        import argparse
+        import numpy as np
+        import soundfile as sf
+        import audiobook_epub
+        import colab_run_all
+        from test_synthesis_groups import FakeModel, fake_mlx, SR
+        import synthesize_qwen_mlx as q
+
+        work = Path(tempfile.mkdtemp())
+        book = make_book(work / "book.epub")
+        cast_path = cast_book.analyze(book, work / "cast", "key", transport=fake_llm, sleep=lambda s: None)
+        cast = json.loads(cast_path.read_text(encoding="utf-8"))
+        texts = {}
+        for number, voice in enumerate(v for v in cast["voices"] if not v.get("fixed")):
+            texts[voice["id"]] = f"Образец героя {voice['id']}."
+            voice["sample_text"] = texts[voice["id"]]
+        cast_path.write_text(json.dumps(cast, ensure_ascii=False), encoding="utf-8")
+        tones = iter(range(150, 400, 60))
+        pack = voice_pack.design(cast_path, work / "out" / "voice-pack", generate=lambda text, instruct, seed: (
+            0.3 * np.sin(2 * np.pi * next(tones) * np.arange(SR * 2) / SR)).astype("float32"))
+
+        project = work / "out" / "project"
+        cast_book.build_manifest(book, project, pack / "cast.json")
+        audiobook_epub.prepare(str(project / "manifest.json"), str(project / "source"), highlight="sentence",
+                               start="p00001")
+        narrator = work / "narrator.wav"
+        sf.write(narrator, (0.2 * np.sin(np.arange(SR * 3) / SR * 2 * np.pi * 120)).astype("float32"), SR)
+        (work / "narrator.json").write_text(json.dumps({"text": "Голос рассказчика."}, ensure_ascii=False))
+        args = argparse.Namespace(out=str(work / "out"), voice=str(narrator), voice_pack=str(pack))
+        library = colab_run_all.stage_voices(args, project / "source")
+
+        class Recorder(FakeModel):
+            refs = []
+
+            def generate(self, text, **options):
+                self.refs.append((text, options.get("ref_text")))
+                yield from FakeModel.generate(self, text)
+
+        model = Recorder()
+        run = argparse.Namespace(manifest=str(project / "source/manifest.json"), model=str(work), out=str(work / "audio"),
+                                 seconds=300, whole_book=True, start_paragraph="p00001", temperature=0.9,
+                                 max_tokens=1024, stress_marks="keep", plan=False, mode="clone",
+                                 rab_generation=False, voice_library=str(library), design_model=None,
+                                 reference_source=None, import_only=False, ephemeral_voices=False)
+        with fake_mlx(model):
+            q.render(run)
+        prepared = json.loads((project / "source/manifest.json").read_text(encoding="utf-8"))
+        expected = dict(texts, narrator="Голос рассказчика.")
+        checked = set()
+        for text, ref_text in model.refs[1:]:                     # первый вызов — прогрев
+            owners = {s["speaker"] for s in prepared["segments"]
+                      if re.sub(r"[́\s]", "", s["text"])[:12] in re.sub(r"[́\s]", "", text)}
+            self.assertEqual(len(owners), 1, (text, owners))
+            owner = owners.pop()
+            self.assertEqual(ref_text, expected[owner], (text, owner))
+            checked.add(owner)
+        self.assertTrue({"narrator", "mat", "petya", "other_voices_female"} <= checked, checked)
