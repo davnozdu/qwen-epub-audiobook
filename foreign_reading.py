@@ -19,6 +19,7 @@ WORD = r"[A-Za-zÀ-ÖØ-öø-ÿĀ-ž](?:[A-Za-zÀ-ÖØ-öø-ÿĀ-ž'’\-]*[A-Za
 PATTERN = re.compile(WORD + r"(?:[  ]+" + WORD + r")*")
 VOWELS = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
 BATCH = 60
+ROUNDS = 3              # вставки без верного прочтения переспрашиваются: LLM ошибается не каждый раз
 PROMPT = (
     "Ты готовишь русскую аудиокнигу. В тексте встречаются иностранные слова и выражения латиницей: латынь, "
     "немецкий, французский, английский, итальянский и другие. Для каждого id запиши, как его произнесёт "
@@ -56,12 +57,44 @@ def valid(reading: str) -> bool:
     return True
 
 
+def tidy(reading: str) -> str:
+    """Ударение в односложном слове (хи́р, ле́тс) лишнее: снимаем знак, а не выбрасываем всю вставку.
+
+    LLM ставит его часто и каждый раз по-разному; из-за одного знака целая фраза («Let's get out of
+    here») оставалась латиницей, и модель читала её как придётся.
+    """
+    reading = (reading or "").strip().replace("\u0300", "\u0301")
+    parts = re.split(r"([ \-])", reading)
+    return "".join(part.replace("\u0301", "") if sum(ch in VOWELS for ch in part) <= 1 else part
+                   for part in parts)
+
+
 def apply(text: str, readings: dict) -> str:
     return PATTERN.sub(lambda m: readings.get(m.group(0), m.group(0)), text)
 
 
 def ask(llm, items: list, log=print) -> dict:
-    """[(вставка, контекст)] → {вставка: прочтение} для верных ответов; остальные — как написаны."""
+    """[(вставка, контекст)] → {вставка: прочтение} для верных ответов; остальные — как написаны.
+
+    Не получившие верного прочтения переспрашиваются (всего до ROUNDS раз).
+    """
+    result = {}
+    for attempt in range(ROUNDS):
+        missing = [item for item in items if item[0] not in result]
+        if not missing:
+            break
+        note = ""
+        if attempt:
+            log(f"иностранные слова: переспрашиваю {len(missing)} без верного прочтения")
+            # Другой текст запроса — не тот же ответ из кэша, и модель знает, что исправить.
+            note = (f"Повторный запрос {attempt + 1}: прошлое прочтение этих id не прошло проверку. Только "
+                    "кириллица; в слове из двух и более слогов ровно один знак ударения после ударной "
+                    "гласной; в односложном слове и в слове с ё — ни одного.\n")
+        result.update(ask_once(llm, missing, log, note))
+    return result
+
+
+def ask_once(llm, items: list, log=print, note: str = "") -> dict:
     result = {}
     batches = [items[i:i + BATCH] for i in range(0, len(items), BATCH)]
     for number, batch in enumerate(batches, 1):
@@ -69,14 +102,14 @@ def ask(llm, items: list, log=print) -> dict:
         payload = {"items": [{"id": i, "text": fragment, "context": context}
                              for i, (fragment, context) in enumerate(batch, 1)]}
         try:
-            answer = llm.call(PROMPT + json.dumps(payload, ensure_ascii=False))
+            answer = llm.call(PROMPT + note + json.dumps(payload, ensure_ascii=False))
         except Exception as exc:                  # без прочтения книга всё равно озвучится
             log(f"прочтение иностранных слов не получено, они останутся как написаны: {exc}")
             continue
         for row in answer.get("readings") or []:
             if not isinstance(row, dict) or not isinstance(row.get("id"), int) or not 1 <= row["id"] <= len(batch):
                 continue
-            reading = str(row.get("reading") or "").strip().replace("̀", "́")
+            reading = tidy(str(row.get("reading") or ""))
             if valid(reading):
                 result[batch[row["id"] - 1][0]] = reading
     return result

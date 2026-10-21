@@ -13,10 +13,11 @@ import foreign_reading as f  # noqa: E402
 
 class FakeLLM:
     def __init__(self, answers):
-        self.answers, self.calls = answers, 0
+        self.answers, self.calls, self.prompts = answers, 0, []
 
     def call(self, prompt):
         self.calls += 1
+        self.prompts.append(prompt)
         items = json.loads(prompt[prompt.index('{"items"'):])["items"]
         return {"readings": [{"id": item["id"], "reading": self.answers.get(item["text"], "")} for item in items]}
 
@@ -48,8 +49,31 @@ class ForeignReadingTest(unittest.TestCase):
         self.assertEqual(result[0]["tts_text"], "Ги́ллиан Флинн. зе гро́унап.")
         self.assertEqual(result[0]["text"], "Gillian Flynn. THE GROWNUP.")       # текст книги не тронут
         self.assertEqual(result[1]["tts_text"], "Он сказа́л: ex post facto.")    # неверное прочтение не взято
+        self.assertEqual(llm.calls, f.ROUNDS)    # неверное прочтение переспрошено, сверх ROUNDS — нет
         f.prepare(path, llm, log=lambda message: None)
-        self.assertEqual(llm.calls, 2)        # повтор спросил только то, что не получилось в первый раз
+        self.assertEqual(llm.calls, 2 * f.ROUNDS)    # повтор спросил только то, что не получилось
+        self.assertEqual(len(llm.prompts[-1].split('"text"')), 2)
+
+    def test_extra_mark_on_one_syllable_word_is_removed_not_rejected(self):
+        # «Let's get out of here» оставалась латиницей из-за одного лишнего знака в «хи́р».
+        self.assertEqual(f.tidy("ле́тс гет а́ут ов хи́р"), "летс гет а́ут ов хир")
+        self.assertTrue(f.valid(f.tidy("ле́тс гет а́ут ов хи́р")))
+        self.assertEqual(f.tidy("Ги́ллиан Флинн"), "Ги́ллиан Флинн")
+        self.assertEqual(f.tidy("ту би о́р нот ту би"), "ту би ор нот ту би")
+        self.assertFalse(f.valid(f.tidy("Гиллиан")))      # нехватку ударения tidy не придумывает
+
+    def test_wrong_reading_is_asked_again_with_a_different_prompt(self):
+        class Flaky(FakeLLM):
+            def call(self, prompt):
+                answer = super().call(prompt)
+                if self.calls == 1:                     # первый ответ — без ударения, второй — верный
+                    answer["readings"][0]["reading"] = "кобальт"
+                return answer
+        llm = Flaky({"Kobalt": "ко́бальт"})
+        self.assertEqual(f.ask(llm, [("Kobalt", "это Kobalt")], log=lambda m: None), {"Kobalt": "ко́бальт"})
+        self.assertEqual(llm.calls, 2)
+        self.assertNotEqual(llm.prompts[0], llm.prompts[1])     # не тот же запрос: кэш не вернёт старое
+        self.assertIn("Повторный запрос", llm.prompts[1])
 
     def test_without_llm_text_stays_as_written(self):
         work = Path(tempfile.mkdtemp())
