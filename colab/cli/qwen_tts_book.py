@@ -304,6 +304,8 @@ def run_pipeline(args, runner, book):
         command += ["--voice", str(args.voice)]
     if getattr(args, "voice_pack", None):
         command += ["--voice-pack", str(args.voice_pack)]
+    if getattr(args, "stress", "silero") != "silero":
+        command += ["--stress", args.stress]      # ударения: только словарь или словарь + Silero + LLM
     if getattr(args, "cast", False):
         command += ["--cast-only", "--cast-zip", str(args.zip)]
     if args.local:
@@ -528,6 +530,9 @@ def main():
                         help="многоголосая книга, первая машина: разметка ролей и образцы голосов")
     parser.add_argument("--voice-pack", default=None,
                         help="многоголосая книга, вторая машина: пакет голосов с первой")
+    parser.add_argument("--stress", choices=["silero", "dictionary", "arbiter"], default="silero",
+                        help="ударения и ё: silero (как было), dictionary (только словари Supertonic), "
+                             "arbiter (словарь + Silero, споры решает LLM)")
     parser.add_argument("--upto", default="package",
                         help="остановиться на стадии конвейера (в режиме частей всегда synth)")
     args, extra = parser.parse_known_args()      # у ядра бывают свои аргументы (colab cli, ipykernel)

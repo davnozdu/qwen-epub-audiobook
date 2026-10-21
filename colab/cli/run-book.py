@@ -761,7 +761,7 @@ def fetch_parts(colab: str, session: str, plan: dict | None, target_dir: pathlib
 
 def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
                    drive_dir: str, job: pathlib.Path, shrink: dict, raw: dict = None,
-                   cast: bool = False, voice_pack: str = "") -> pathlib.Path:
+                   cast: bool = False, voice_pack: str = "", stress: str = "silero") -> pathlib.Path:
     """Задание уходит на машину вместе с аргументами: colab exec аргументы не передаёт."""
     args = [book_remote]
     if cast:
@@ -769,6 +769,8 @@ def build_job_file(book_remote: str, fragment: str, highlight: str, drive: bool,
         args += ["--cast", "--no-drive", "--no-shrink"]
     if voice_pack:
         args += ["--voice-pack", voice_pack]
+    if stress and stress != "silero" and not cast:
+        args += ["--stress", stress]          # первой машине многоголосой книги ударения не нужны
     if fragment:
         args += ["--seconds", fragment]
     if highlight:
@@ -920,6 +922,10 @@ def main() -> int:
                              "поставщик, модель и ключ — переменные LLM_PROVIDER, LLM_MODEL, LLM_API_KEY")
     parser.add_argument("--voice-pack", default="",
                         help="многоголосая книга, вторая машина: пакет голосов с первой (zip)")
+    parser.add_argument("--stress", choices=["silero", "dictionary", "arbiter"],
+                        default=os.environ.get("STRESS_MODE", "silero"),
+                        help="ударения и ё: silero (как было), dictionary (только словари Supertonic), "
+                             "arbiter (словарь + Silero, споры решает LLM: LLM_PROVIDER, LLM_MODEL, LLM_API_KEY)")
     parser.add_argument("--max-hours", type=float, default=float(os.environ.get("SHRINK_HOURS", "7")),
                         help="если книга длиннее — задание разрежет её на части (0 — не резать)")
     parser.add_argument("--shrink-dir", default=os.environ.get("SHRINK_DIR", "Audiobooks-shrink"),
@@ -1048,7 +1054,7 @@ def main() -> int:
             run([colab, "upload", "-s", args.session, str(cache), f"/content/{cache.name}"], timeout=3600)
     generated = build_job_file(remote_book, args.fragment, args.highlight, drive_ok, args.drive_dir,
                                job, shrink, {"part": args.part_index} if args.parts_raw else None,
-                               cast=args.cast, voice_pack=remote_pack)
+                               cast=args.cast, voice_pack=remote_pack, stress=args.stress)
     print("\n== задание ==")
     try:
         # --timeout у colab exec по умолчанию 30 секунд: на книгу этого мало, ждём до суток.

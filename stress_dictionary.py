@@ -13,7 +13,10 @@ def plain(word):
 
 
 def acute(word):
-    return re.sub(r"\+([аеёиоуыэюяАЕЁИОУЫЭЮЯ])", lambda m: m[1] + "\u0301", word)
+    """«+» перед гласной → U+0301 после неё. Ё ударна сама: знак после неё не ставим (и убираем,
+    как в полном словаре russian-v1.1, где записано «ё́лка»)."""
+    marked = re.sub(r"\+([аеёиоуыэюяАЕЁИОУЫЭЮЯ])", lambda m: m[1] + "\u0301", word)
+    return re.sub("([ёЁ])\u0301", r"\1", marked)
 
 
 class BinaryAccentDictionary:

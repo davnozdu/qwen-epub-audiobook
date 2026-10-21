@@ -67,3 +67,87 @@ class ArbitrationTest(unittest.TestCase):
         spec = request_spec(a.prompt_for(a.disputes(fixture())), SimpleNamespace(model='fast', no_think=True, max_tokens=4096))
         self.assertFalse(spec['think'])
         self.assertEqual(spec['options']['temperature'], 0)
+
+
+def yo_fixture():
+    """Словарь и Silero спорят о ё: «все» или «всё» — решает смысл предложения."""
+    text = 'Он узнал все. Потом ушел.'
+    s = {'id': 's1', 'paragraph_id': 'p1', 'text': text, 'speaker': 'narrator', 'pause_after_ms': 800,
+         'tts_normalized': text, 'tts_dictionary_text': 'Он узна́л все. По́том ушёл.',
+         'tts_silero_text': 'Он узна́л всё. По́том ушёл.', 'tts_text': 'Он узна́л все. По́том ушёл.'}
+    m = {'book': {}, 'voices': [{'id': 'narrator'}], 'segments': [s], 'paragraph_texts': {'p1': text}}
+    s['tts_sha256'] = digest([p.VERSION, text, s['tts_text']])
+    m['speech_preparation'] = {'version': p.VERSION, 'input_sha256': p.input_identity(m)}
+    p.check(m)
+    return m
+
+
+class YoArbitrationTest(unittest.TestCase):
+    def test_yo_disagreement_is_a_dispute(self):
+        rows = a.disputes(yo_fixture())
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(set(rows[0]['candidates'].values()), {'все', 'всё'})
+
+    def test_yo_option_is_shown_stressed(self):
+        prompt = a.prompt_for(a.disputes(yo_fixture()))
+        self.assertIn('"display": "всЁ"', prompt)
+        self.assertIn('"current_stress": 1', prompt)
+        self.assertIn('"yo": true', prompt)
+
+    def test_choosing_yo_changes_only_that_letter(self):
+        m = yo_fixture(); rows = a.disputes(m)
+        label = next(k for k, v in rows[0]['candidates'].items() if v == 'всё')
+        result, _ = a.apply(m, rows, {'decisions': [{'id': rows[0]['id'], 'choice': label, 'reason': 'Смысл: всё'}]})
+        self.assertEqual(result['segments'][0]['tts_text'], 'Он узна́л всё. По́том ушёл.')
+
+    def test_different_words_are_not_a_dispute(self):
+        m = yo_fixture(); m['segments'][0]['tts_silero_text'] = 'Он узна́л вся. По́том ушёл.'
+        self.assertEqual(a.disputes(m), [])
+
+
+class ProviderClientTest(unittest.TestCase):
+    """Арбитр через тот же клиент, что разметка ролей: Ollama Cloud или DeepSeek API."""
+
+    def answer(self, body, choice):
+        import json, re
+        ids = re.findall(r'"id": "(d\d+)"', body['messages'][-1]['content'])
+        content = json.dumps({'decisions': [{'id': i, 'choice': choice, 'reason': 'норма'} for i in ids]})
+        if 'response_format' in body:
+            return {'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]}
+        return {'done_reason': 'stop', 'message': {'content': content}}
+
+    def run_with(self, provider, choice='B'):
+        import tempfile
+        from cast_book import LLM
+        sent = []
+        def transport(body):
+            sent.append(body)
+            return self.answer(body, choice)
+        with tempfile.TemporaryDirectory() as cache:
+            llm = LLM('key', 'deepseek-v4.1-flash', cache, provider=provider, transport=transport)
+            result, report = a.arbitrate(fixture(), SimpleNamespace(model='deepseek-v4.1-flash'), Path(cache), 'key', llm)
+        return result, report, sent
+
+    def test_ollama_client(self):
+        result, report, sent = self.run_with('ollama')
+        self.assertEqual(len(sent), 1)
+        self.assertFalse(sent[0]['think'])
+        self.assertEqual(report['disputes'], 1)
+        self.assertEqual(report['errors'], [])
+
+    def test_deepseek_client(self):
+        result, report, sent = self.run_with('deepseek')
+        self.assertEqual(sent[0]['thinking'], {'type': 'disabled'})
+        self.assertEqual(report['errors'], [])
+
+    def test_rejected_key_keeps_hybrid_and_stops(self):
+        import tempfile, urllib.error
+        from cast_book import LLM
+        def transport(body):
+            raise urllib.error.HTTPError('https://ollama.com', 401, 'unauthorized', {}, None)
+        m = fixture()
+        with tempfile.TemporaryDirectory() as cache:
+            llm = LLM('bad', 'm', cache, transport=transport)
+            result, report = a.arbitrate(m, SimpleNamespace(model='m'), Path(cache), 'bad', llm)
+        self.assertEqual([s['tts_text'] for s in result['segments']], [s['tts_text'] for s in m['segments']])
+        self.assertIn('отклонил ключ', report['errors'][0])

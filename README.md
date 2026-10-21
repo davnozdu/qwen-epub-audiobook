@@ -171,6 +171,11 @@ N отключает **только проверку ударений LLM**: р�
 
 ## Нормализация и ударения из Supertonic
 
+На Colab (`colab/colab_run_all.py --stress`, бот передаёт выбор из настроек): `silero` — как
+было; `dictionary` — `prepare_speech.py offline` с полным `russian_accents_full.sacc`, без Silero;
+`arbiter` — гибрид с полным словарём, споры (ударение и е/ё) решает LLM из `LLM_PROVIDER`,
+`LLM_MODEL`, `LLM_API_KEY` (Ollama Cloud или DeepSeek API). Без ключа — гибрид, без вопросов.
+
 `run.command` автоматически запускает подготовку речи **до загрузки обеих TTS-моделей**.
 Основной путь — гибрид словаря и Silero; облачная LLM включается по выбору Y/N.
 DeepSeek через Ollama работает без рассуждений и получает пакеты до 16 споров,

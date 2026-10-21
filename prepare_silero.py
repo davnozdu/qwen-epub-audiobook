@@ -222,6 +222,9 @@ def main():
     parser.add_argument("--endpoint", default="https://ollama.com")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--provider", choices=["ollama", "deepseek"], default=None,
+                        help="арбитр через Ollama Cloud или DeepSeek API (ключ — LLM_API_KEY); "
+                             "без ключа споры решает гибрид, вопросов не задаётся")
     args = parser.parse_args()
     try:
         cloud_key = None
@@ -244,14 +247,27 @@ def main():
             from arbitrate_stress import arbitrate, disputes
             candidates = disputes(result)
             write(destination.parent / "stress-disputes.json", {"disputes": candidates})
-            key = None
+            key = llm = None
             if candidates and args.llm_disputes == "run":
-                key = cloud_key or os.environ.get("OLLAMA_API_KEY") or getpass.getpass("Ollama API key (не сохраняется): ")
+                if args.provider:
+                    key = cloud_key or os.environ.get("LLM_API_KEY") or os.environ.get("OLLAMA_API_KEY")
+                else:
+                    key = cloud_key or os.environ.get("OLLAMA_API_KEY") or getpass.getpass("Ollama API key (не сохраняется): ")
             cloud_key = None
             args.command = args.llm_disputes
             args.no_think = True
-            reviewed, arbitration = arbitrate(result, args, destination.parent / "dispute-cache", key)
-            key = None
+            print(f"Споров словаря и Silero: {len(candidates)}", flush=True)
+            if args.provider and candidates and args.llm_disputes == "run" and not key:
+                # Машина не интерактивна: ключ не спрашиваем, книгу не роняем.
+                print("Нет ключа LLM: споры остаются за гибридом (словарь + Silero).", flush=True)
+                args.llm_disputes = "off"
+            elif args.provider and candidates and args.llm_disputes == "run":
+                from cast_book import LLM
+                llm = LLM(key, args.model, destination.parent / "dispute-cache", provider=args.provider)
+                print(f"LLM-арбитр: {llm.service}, модель {llm.model}, пакеты по 16 споров", flush=True)
+        if args.llm_disputes != "off":
+            reviewed, arbitration = arbitrate(result, args, destination.parent / "dispute-cache", key, llm)
+            llm = key = None
             write(destination.parent / "stress-arbitration.json", arbitration)
             if reviewed is None:
                 print("Подготовлен запрос для LLM; аудио не запускается.")

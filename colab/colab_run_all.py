@@ -18,7 +18,11 @@
   4. model    веса Ru-Stress-CF (~4,5 ГБ) в локальную папку + проверка размера и состава
   5. manifest EPUB → манифест проекта (один чтец; с --voice-pack — многоголосый по готовой разметке)
   6. prepare  audiobook_epub.py prepare: нарезка по предложениям + book-text.epub
-  7. stress   prepare_silero.py: словарь Supertonic + Silero (ударения как в проде)
+  7. stress   ударения и ё, режим --stress:
+              silero     словарь в комплекте + Silero (по умолчанию, как было);
+              dictionary только словари Supertonic (+ полный russian_accents_full.sacc), без Silero;
+              arbiter    полный словарь + Silero, споры между ними решает LLM по предложению
+                         и абзацу (та же модель и ключ, что у бота: LLM_PROVIDER/LLM_MODEL/LLM_API_KEY)
   8. voices   образец чтеца с GitHub → библиотека голосов под ПОДГОТОВЛЕННЫЙ манифест
               (именно этот хеш книги сверяет синтез, поэтому стадия идёт после prepare)
   9. synth    synthesize_qwen_mlx.py: MLX/CUDA, mode clone, rab-generation
@@ -68,6 +72,14 @@ def tg(text) -> None:
         pass
 
 MODEL_REPO = "siriusfreak/qwen3-tts-12hz-1.7b-ru-stress-cf"
+# Полный словарь ударений и ё (davnozdu/supertonic-dictionaries, russian-v1.1): 3,26 млн словоформ.
+FULL_DICTIONARY = ("https://github.com/davnozdu/supertonic-dictionaries/releases/download/"
+                   "russian-v1.1/russian_accents_full.sacc")
+FULL_DICTIONARY_SIZE = 179200764
+FULL_DICTIONARY_SHA256 = "a1ac32606e99f6d8ab8e8ce796b0005b0693908555460656976c54e171658b27"
+STRESS_MODES = {"silero": "словарь в комплекте + Silero",
+                "dictionary": "только словари Supertonic (полный словарь), без Silero",
+                "arbiter": "полный словарь + Silero, споры решает LLM"}
 MODEL_NAME = "Qwen3-TTS-12Hz-1.7B-Ru-Stress-CF-source"
 DESIGN_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"     # только для образцов героев (первая машина)
 DESIGN_NAME = "Qwen3-TTS-12Hz-1.7B-VoiceDesign"
@@ -517,10 +529,76 @@ def stage_prepare(args, project):
 
 
 # ─────────────────────────── 8. ударения ───────────────────────────
+def sha256_of(path: Path) -> str:
+    checksum = hashlib.sha256()
+    with path.open("rb") as reader:
+        for block in iter(lambda: reader.read(1 << 20), b""):
+            checksum.update(block)
+    return checksum.hexdigest()
+
+
+def full_dictionary(dictionary_dir: Path) -> Path:
+    """Полный словарь Supertonic рядом с dictionary.json: StressDictionary подхватит его сам.
+
+    Качаем один раз за машину (≈180 МБ) и сверяем размер и SHA-256: битый файл словарь отвергнет,
+    и книга упала бы на середине подготовки — лучше здесь и с понятной причиной.
+    """
+    target = dictionary_dir / "russian_accents_full.sacc"
+    if target.is_file() and target.stat().st_size == FULL_DICTIONARY_SIZE:
+        return target
+    partial = target.with_suffix(".sacc.partial")
+    print("полный словарь ударений и ё: скачиваю", FULL_DICTIONARY, flush=True)
+    run(["curl", "-fsSL", "--retry", "3", "-C", "-", FULL_DICTIONARY, "-o", str(partial)])
+    size = partial.stat().st_size
+    if size != FULL_DICTIONARY_SIZE or sha256_of(partial) != FULL_DICTIONARY_SHA256:
+        partial.unlink(missing_ok=True)
+        raise SystemExit(f"полный словарь не прошёл проверку (размер {size}) — скачайте заново")
+    partial.rename(target)
+    print(f"полный словарь на месте: {target} ({size / 1e6:.0f} МБ)", flush=True)
+    return target
+
+
+def stress_dir(mode: str) -> Path:
+    """Каталог словаря для режима. silero — как было: только dictionary.json из комплекта."""
+    base = REPO / "data" / "stress"
+    if mode == "silero":
+        return base
+    full = base / "full"                     # рядом, но отдельно: у silero полный словарь не должен появиться
+    full.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(base / "dictionary.json", full / "dictionary.json")
+    full_dictionary(full)
+    return full
+
+
 def stage_stress(args, source):
-    banner("stress", "Ударения: словарь Supertonic + Silero")
-    run([sys.executable, "prepare_silero.py", "--manifest", str(source / "manifest.json"),
-         "--dictionary-dir", str(REPO / "data" / "stress"), "--llm-disputes", "off"])
+    mode = getattr(args, "stress", "silero")
+    banner("stress", f"Ударения и ё: {STRESS_MODES[mode]}")
+    tg(f"🔤 Ударения и ё: {STRESS_MODES[mode]}")
+    manifest = str(source / "manifest.json")
+    dictionary_dir = str(stress_dir(mode))
+    if mode == "dictionary":
+        run([sys.executable, "prepare_speech.py", "offline", "--manifest", manifest,
+             "--dictionary-dir", dictionary_dir])
+    elif mode == "arbiter":
+        sys.path.insert(0, str(REPO))
+        import cast_book
+        provider = os.environ.get("LLM_PROVIDER", "ollama").strip() or "ollama"
+        model = os.environ.get("LLM_MODEL", "").strip() or cast_book.MODEL
+        if not cast_book.llm_key():
+            tg("⚠️ Арбитр ударений: нет ключа LLM — споры словаря и Silero решает гибрид")
+        run([sys.executable, "prepare_silero.py", "--manifest", manifest, "--dictionary-dir", dictionary_dir,
+             "--llm-disputes", "run", "--provider", provider, "--model", model])
+        report = source / "stress-arbitration.json"
+        if report.is_file():
+            data = json.loads(report.read_text(encoding="utf-8"))
+            line = (f"🔤 Арбитр ударений ({provider}, {model}): споров {data.get('disputes', 0)}, "
+                    f"исправлено слов {data.get('changed_words', 0)}"
+                    + (f", ошибок LLM {len(data['errors'])}" if data.get("errors") else ""))
+            print(line, flush=True)
+            tg(line)
+    else:
+        run([sys.executable, "prepare_silero.py", "--manifest", manifest,
+             "--dictionary-dir", dictionary_dir, "--llm-disputes", "off"])
 
     prepared = json.loads((source / "manifest.json").read_text(encoding="utf-8"))
     unresolved = (prepared.get("speech_preparation") or {}).get("unresolved_numerals") or {}
@@ -701,6 +779,9 @@ def main():
     parser.add_argument("--cast-only", action="store_true",
                         help="первая машина многоголосой книги: только разметка ролей и образцы голосов")
     parser.add_argument("--cast-zip", default=None, help="куда положить архив пакета голосов (--cast-only)")
+    parser.add_argument("--stress", choices=list(STRESS_MODES), default="silero",
+                        help="ударения и ё: silero (как было), dictionary (только словари Supertonic), "
+                             "arbiter (словарь + Silero, споры решает LLM)")
     parser.add_argument("--skip-gpu-check", action="store_true",
                         help="не требовать GPU (для локальной проверки шагов до синтеза)")
     args = parser.parse_args()

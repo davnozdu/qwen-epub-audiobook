@@ -111,6 +111,20 @@ class NormalizerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 BinaryAccentDictionary(path)
 
+    def test_full_dictionary_yo_has_no_extra_accent(self):
+        # Полный словарь (russian-v1.1) хранит «ё́лка»: ё ударна сама, U+0301 после неё не ставим.
+        from stress_dictionary import StressDictionary
+        values = {"елка": "ё\u0301лка", "слезы": "слё\u0301зы", "ветер": "ве\u0301тер"}
+        dictionary = StressDictionary.__new__(StressDictionary)
+        dictionary.data = {"phrases": {}, "corrections": {}, "homographs": {}, "exceptions": {}, "gram": {}}
+        dictionary.binary = type("Binary", (), {"lookup": staticmethod(values.get)})()
+        self.assertEqual(dictionary.lookup("Елка"), "ёлка")
+        self.assertEqual(dictionary.lookup("слезы"), "слёзы")
+        self.assertEqual(dictionary.lookup("ветер"), "ве\u0301тер")
+        self.assertEqual(dictionary.apply("Елка и слезы")[0], "Ёлка и слёзы")
+        dictionary.data["corrections"]["слезы"] = "сл+ёзы"         # правки Supertonic: тот же случай
+        self.assertEqual(dictionary.lookup("слезы"), "слёзы")
+
     def test_supertonic_reference_cases(self):
         cases = {
             "В списке 1001 имя и 1101 запись.": "В списке одна тысяча одно имя и одна тысяча сто одна запись.",
