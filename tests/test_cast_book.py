@@ -375,8 +375,9 @@ class EndToEndRolesTest(unittest.TestCase):
         expected = dict(texts, narrator="Голос рассказчика.")
         checked = set()
         for text, ref_text in model.refs[1:]:                     # первый вызов — прогрев
-            owners = {s["speaker"] for s in prepared["segments"]
-                      if re.sub(r"[́\s]", "", s["text"])[:12] in re.sub(r"[́\s]", "", text)}
+            # Знаки не сравниваем: конец вызова модели закрывается точкой (closed_phrase).
+            bare = lambda value: re.sub(r"[́\s.,;:!?…]", "", value)
+            owners = {s["speaker"] for s in prepared["segments"] if bare(s["text"])[:12] in bare(text)}
             self.assertEqual(len(owners), 1, (text, owners))
             owner = owners.pop()
             self.assertEqual(ref_text, expected[owner], (text, owner))

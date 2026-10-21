@@ -193,6 +193,29 @@ def fake_mlx(model):
 
 
 @unittest.skipIf(np is None, "numpy/soundfile нужны для синтеза")
+class ClosedPhraseTests(unittest.TestCase):
+    """Вызов модели кончается законченной фразой: на запятой модель обрывает последнее слово."""
+
+    def test_open_endings_become_a_period(self):
+        for given, wanted in (("– Не знаю, зачем я пришла,", "– Не знаю, зачем я пришла."),
+                              ("– начала она,", "– начала она."),
+                              ("Привет, —", "Привет."),
+                              ("Итак:", "Итак."),
+                              ("Это одна из лучших книг всех времен»", "Это одна из лучших книг всех времен».")):
+            self.assertEqual(q.closed_phrase(given), wanted)
+
+    def test_finished_phrase_is_untouched(self):
+        for text in ("Он ушёл.", "Правда?»", "Да!", "Ну…", "* * *", "Она пришла́."):
+            self.assertEqual(q.closed_phrase(text), text)
+
+    def test_stress_mark_on_last_word_survives(self):
+        self.assertEqual(q.closed_phrase("– Я пришла́,"), "– Я пришла́.")
+
+    def test_group_text_closes_only_the_end_of_the_call(self):
+        group = [(1, {"paragraph_id": "p1"}), (2, {"paragraph_id": "p1"})]
+        self.assertEqual(q.group_text(group, ["– Да,", "– сказал он,"]), "– Да, – сказал он.")
+
+
 class SplitAudioTests(unittest.TestCase):
     def test_cut_lands_in_the_pause_not_where_text_share_predicts(self):
         tone = lambda s: np.full(int(SR * s), 0.3, np.float32)

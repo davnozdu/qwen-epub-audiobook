@@ -267,7 +267,26 @@ def group_text(group, targets):
             target = target.rstrip() + "."
         if any(c.isalnum() for c in target):      # «* * *» и одинокое тире модели не нужны
             parts.append(target)
-    return " ".join(parts) or " ".join(targets)
+    return closed_phrase(" ".join(parts) or " ".join(targets))
+
+
+CLOSED = re.compile(r"[.!?…][»”\"')\]]*$")
+OPEN_TAIL = re.compile(r"[\s,;:—–-]+$")
+
+
+def closed_phrase(text):
+    """Текст одного вызова модели кончается законченной фразой: запятая, тире, двоеточие на конце
+    — точка; нет знака — тоже точка.
+
+    Реплику при смене голоса режет посреди фразы: «— Не знаю, зачем я пришла,» и «— начала она,».
+    Получив запятую в конце, модель ждёт продолжения и обрывает последнее слово: на настоящих
+    фрагментах книги резкий обрыв конца был в 7 дублях из 24, с точкой — в 1 из 24. Точка нужна
+    только модели: текст книги, подсветка и EPUB не меняются.
+    """
+    body = text.rstrip()
+    if not body or CLOSED.search(body) or not any(c.isalnum() for c in body):
+        return text
+    return OPEN_TAIL.sub("", body) + "."
 
 
 def spoken_weight(text):
