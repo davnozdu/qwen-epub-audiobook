@@ -213,14 +213,21 @@ def assemble_project(parts: list, meta: dict) -> dict:
             chapters.append(dict(chapter, id=fresh))
         paragraph_map = {}
         for row in project["segments"]:
-            old = str(row["paragraph_id"])
-            if old not in paragraph_map:
-                paragraph_map[old] = f"p{part['index']:02d}{old.lstrip('p')}"
+            # Сегмент, склеенный из коротких соседних абзацев (merge_short), хранит куски в sources
+            # со своими номерами абзацев — их переименовываем так же. Иначе абзацы разных частей
+            # с одним номером (обе начинаются с p00001) сливались в read-along: фразы уходили в
+            # чужой абзац, а на своём месте оставались вторым экземпляром без подсветки.
+            for old in [row["paragraph_id"]] + [piece["paragraph_id"] for piece in row.get("sources") or []]:
+                old = str(old)
+                if old not in paragraph_map:
+                    paragraph_map[old] = f"p{part['index']:02d}{old.lstrip('p')}"
         for row in project["segments"]:
             fresh = deepcopy(row)
             fresh["id"] = f"s{part['index']:02d}-{row['id']}"
             fresh["chapter_id"] = chapter_map.get(row["chapter_id"], str(row["chapter_id"]))
-            fresh["paragraph_id"] = paragraph_map[row["paragraph_id"]]
+            fresh["paragraph_id"] = paragraph_map[str(row["paragraph_id"])]
+            for piece in fresh.get("sources") or []:
+                piece["paragraph_id"] = paragraph_map[str(piece["paragraph_id"])]
             segments.append(fresh)
         if part["source_json"].is_file():
             for paragraph in load(part["source_json"]).get("paragraphs") or []:
@@ -237,6 +244,12 @@ def assemble_project(parts: list, meta: dict) -> dict:
             if voice["id"] not in seen:
                 seen.add(voice["id"])
                 voices.append(voice)
+    if texts:
+        lost = sorted({piece["paragraph_id"] for row in segments
+                       for piece in (row.get("sources") or [row]) if piece["paragraph_id"] not in texts})
+        if lost:
+            # Без текста абзаца read-along не сверит кусок с книгой и молча перемешает абзацы.
+            raise ValueError(f"после склейки частей у абзацев нет текста: {', '.join(lost[:10])}")
     return {"book": book, "chapters": chapters, "voices": voices, "segments": segments,
             "paragraph_texts": texts}
 

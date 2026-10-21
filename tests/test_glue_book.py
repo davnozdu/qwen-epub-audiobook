@@ -9,6 +9,7 @@ benchmark, склейка, normalize, музыка, сборка m4b и read-alo
 """
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -139,6 +140,46 @@ def glue(*arguments) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, cwd=str(REPO))
 
 
+class AssembleTests(unittest.TestCase):
+    """Склейка манифестов частей — без звука и ffmpeg."""
+
+    def make_part(self, root, index, paragraphs):
+        """Часть после многоголосой подготовки: два коротких абзаца одного голоса склеены в один
+        сегмент (merge_short), куски записаны в sources со СВОИМИ номерами абзацев."""
+        folder = root / f"part-{index}" / "project"
+        folder.mkdir(parents=True)
+        pieces = [{"paragraph_id": f"p{n:05d}", "text": text, "char_start": 0, "char_end": len(text)}
+                  for n, text in enumerate(paragraphs, 1)]
+        segment = {"id": "seg000001", "order": 0, "chapter_id": "ch001", "paragraph_id": "p00001",
+                   "speaker": "narrator", "text": " ".join(paragraphs), "sources": pieces,
+                   "source": {"href": f"ch{index:03d}.xhtml", "char_start": 0, "char_end": len(paragraphs[0])},
+                   "pause_after_ms": 800}
+        (folder / "manifest.json").write_text(json.dumps({
+            "book": {"title": "Книга"}, "voices": [{"id": "narrator"}],
+            "chapters": [{"id": "ch001", "title": f"Глава {index}", "href": f"ch{index:03d}.xhtml",
+                          "segment_ids": ["seg000001"]}],
+            "segments": [segment]}, ensure_ascii=False), encoding="utf-8")
+        (folder / "source.json").write_text(json.dumps(
+            {"paragraphs": [{"id": piece["paragraph_id"], "text": piece["text"]} for piece in pieces]},
+            ensure_ascii=False), encoding="utf-8")
+        return {"index": index, "project": folder / "manifest.json", "source_json": folder / "source.json"}
+
+    def test_merged_paragraphs_of_two_parts_do_not_collide(self):
+        import glue_book
+        root = pathlib.Path(tempfile.mkdtemp(prefix="assemble-"))
+        parts = [self.make_part(root, 1, ["Первый абзац первой части.", "Второй абзац первой части."]),
+                 self.make_part(root, 2, ["Первый абзац второй части.", "Второй абзац второй части."])]
+        project = glue_book.assemble_project(parts, {"title": "Книга"})
+        rows = a.sentence_segments(project)
+        where = {row["text"]: row["paragraph_id"] for row in rows}
+        # У каждой фразы — абзац своей части, у всех четырёх абзацев — разные номера.
+        self.assertEqual(where["Первый абзац первой части."], "p0100001")
+        self.assertEqual(where["Второй абзац второй части."], "p0200002")
+        self.assertEqual(len(set(where.values())), 4, where)
+        # И текст каждого абзаца нашёлся по его номеру: сверка «кусок = текст абзаца» не пропущена.
+        self.assertTrue(all(pid in project["paragraph_texts"] for pid in where.values()), where)
+
+
 class GlueTests(unittest.TestCase):
     @unittest.skipUnless(pathlib.Path(a.FFMPEG).exists(), "нужен ffmpeg")
     def test_two_parts_become_one_book(self):
@@ -168,6 +209,16 @@ class GlueTests(unittest.TestCase):
                 overlays = [name for name in zf.namelist() if name.endswith(".smil")]
             self.assertIn("Арина вошла", text)
             self.assertIn("Она села у окна", text)
+            # Каждый абзац книги — ровно один раз и на своём месте. У частей номера абзацев
+            # совпадают (обе начинаются с p00001): если склейка их не развела, абзацы двух частей
+            # сливаются, фразы уходят в чужой абзац, а на своём месте остаются вторым экземпляром.
+            plain = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text))
+            positions = []
+            for _, paragraphs in CHAPTERS:
+                for paragraph in paragraphs:
+                    self.assertEqual(plain.count(paragraph), 1, (paragraph, plain[:2000]))
+                    positions.append(plain.index(paragraph))
+            self.assertEqual(positions, sorted(positions))
             self.assertEqual(len(overlays), len(CHAPTERS), overlays)
             glued = json.loads((root / "glue.json").read_text(encoding="utf-8"))
             counted = sum(len(json.loads((root / f"part-{index}" / "project" / "source" / "manifest.json")
