@@ -4,6 +4,7 @@ import re
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 import zipfile
 from pathlib import Path
 
@@ -312,6 +313,36 @@ class VoicePackTest(unittest.TestCase):
 
 
 class WrapperTest(unittest.TestCase):
+    def test_part_machine_is_released_right_after_raw_download(self):
+        """Сырьё части в томе — машину гасим сразу, до сборки части в образе; и при сбое сборки."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("run_book_raw", ROOT / "colab" / "cli" / "run-book.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        work = Path(tempfile.mkdtemp())
+        steps = []
+
+        def fake_run(command, **kwargs):
+            if command[1] == "download":
+                with zipfile.ZipFile(command[-1], "w") as zf:
+                    zf.writestr("project/audio/segments/a.flac", b"fLaC")
+            steps.append(command[1])
+            return SimpleNamespace(returncode=0)
+
+        module.run = fake_run
+        module.run_quiet = lambda command, **kwargs: steps.append(command[1]) or SimpleNamespace(returncode=0)
+        module.notify_telegram = lambda text: None
+        real_subprocess_run = module.subprocess.run
+        module.subprocess.run = lambda command, **kwargs: steps.append("glue") or SimpleNamespace(returncode=1)
+        try:
+            args = SimpleNamespace(parts_dir=str(work / "parts"), session="s1", part_index="3", stop_on_failure=True,
+                                   keep_session=False, out_dir=str(work / "out"))
+            code = module.fetch_raw("colab", args, "book")
+        finally:
+            module.subprocess.run = real_subprocess_run
+        self.assertEqual(code, 1)                                   # сборка части упала…
+        self.assertEqual(steps, ["download", "stop", "glue"])       # …а машина погашена до неё
+
     def test_job_arguments_for_both_machines(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("run_book", ROOT / "colab" / "cli" / "run-book.py")

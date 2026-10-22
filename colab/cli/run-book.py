@@ -851,6 +851,12 @@ def fetch_raw(colab, args, stem) -> int:
         return 1
     print(f"сырьё части {args.part_index}: {local_zip.name} ({local_zip.stat().st_size / 1e6:.1f} МБ)")
     notify_telegram(f"📦 Часть {args.part_index} озвучена, сырьё забрано в том ({stem}-raw.zip)")
+    # Сырьё в томе — машина больше не нужна: распаковка и сборка части идут здесь, в образе.
+    # Гасим сразу, а не после сборки: иначе она минутами простаивает на время GPU аккаунта, а
+    # при сбое сборки не гасилась бы вовсе.
+    if not args.keep_session:
+        print("== сырьё забрано — освобождаю машину ==", flush=True)
+        run_quiet([colab, "stop", "-s", args.session])
 
     part = parts_dir / f"part-{args.part_index}"
     if part.exists():                            # распаковываем только сырьё этой части
@@ -877,9 +883,6 @@ def fetch_raw(colab, args, stem) -> int:
         return 1
     print(f"часть {args.part_index} готова: {args.out_dir or downloads_dir()}")
     notify_telegram(f"✅ Часть {args.part_index} «{stem}» готова (файлами в архивах)")
-    if not args.keep_session:
-        print("== освобождаю машину ==")
-        run_quiet([colab, "stop", "-s", args.session])
     return 0
 
 
