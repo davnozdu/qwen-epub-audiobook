@@ -231,7 +231,7 @@ class EmptyTakeTests(unittest.TestCase):
         self.assertIn("— Нет, — сказал он.", model.calls)
 
     def test_short_line_that_never_sounds_becomes_a_pause_and_is_reported(self):
-        model = SilentOn("А?")
+        model = SilentOn("— А")                          # молчит во всех записях: «— А?», «— А…», «— А!»
         group, targets = self.group("— А?", "Она не ответила и отвернулась к окну.")
         pieces = q.rows_one_by_one(None, model, self.mx, group, targets, self.voice, 1, self.args,
                                    self.reference, ValueError("Модель не вернула аудио"))
@@ -240,6 +240,16 @@ class EmptyTakeTests(unittest.TestCase):
         self.assertAlmostEqual(len(silence) / SR, 0.3, delta=0.01)
         self.assertNotIn("skipped_text", spoken)
         self.assertGreater(len(speech), SR)
+
+    def test_name_that_fails_as_written_is_spoken_in_another_form(self):
+        # «Конста́нс» одним словом не дал звука ни с одного зерна; без знака ударения — звучит.
+        model = SilentOn("Конста́нс")
+        group, targets = self.group("Конста́нс")
+        (audio, _, metrics), = q.rows_one_by_one(None, model, self.mx, group, targets, self.voice, 1,
+                                                 self.args, self.reference, ValueError("Модель не вернула аудио"))
+        self.assertNotIn("skipped_text", metrics)
+        self.assertGreater(len(audio), SR * 0.2)
+        self.assertIn("Констанс.", model.calls)
 
     def test_long_line_that_never_sounds_still_stops_the_book(self):
         model = SilentOn("отвернулась")
@@ -495,8 +505,9 @@ class PipelineTests(unittest.TestCase):
     def test_group_without_sound_does_not_stop_the_book(self):
         with tempfile.TemporaryDirectory() as folder:
             folder, manifest, _ = self.build(folder, "sentence")
-            # Склейка с «Глава. Он вошёл» молчит целиком (строки по одной — звучат); «— Да.» молчит всегда.
-            model = SilentOn("Глава. Он вошёл", "— Да.")
+            # Склейка с «Глава. Он вошёл» молчит целиком (строки по одной — звучат); «— Да» молчит в любой
+            # записи («— Да.», «— Да…», «— Да!»).
+            model = SilentOn("Глава. Он вошёл", "— Да")
             self.render(folder, model)
             timeline = json.loads((folder / "audio/timeline.json").read_text())["segments"]
             self.assertEqual([r["segment_id"] for r in timeline], [s["id"] for s in manifest["segments"]])

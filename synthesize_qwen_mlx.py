@@ -632,6 +632,22 @@ def audio_metrics(audio, sr):
 SKIPPABLE_WORDS = 3          # не озвучилась и так — кусок не длиннее стольких слов заменяем паузой
 
 
+def spoken_variants(target):
+    """Записи короткой реплики, которые модель произносит, когда исходная сорвалась: как есть, без
+    знаков ударения, с «…» и с «!» на конце. Имя «Конста́нс» одним словом на Colab трижды не дало
+    звука; эти записи на той же модели звучат на всех зёрнах. Слова те же — меняется только запись."""
+    base = closed_phrase(target)
+    plain = base.replace("\u0301", "")
+    bare = re.sub(r"[.!?…]+([»”\"')\]]*)$", r"\1", plain)
+    variants = [base, plain, CLOSED.sub("", bare) + "…" if not CLOSED.search(bare) else bare,
+                bare.rstrip("…") + "!" if not bare.endswith(("!", "?")) else bare]
+    result = []
+    for text in variants:
+        if text not in result:
+            result.append(text)
+    return result
+
+
 def rows_one_by_one(guard, model, mx, group, targets, voice, seed, args, reference, failure):
     """Группа не дала звука ни с одного дубля — строки по одной, отдельными вызовами.
 
@@ -644,17 +660,24 @@ def rows_one_by_one(guard, model, mx, group, targets, voice, seed, args, referen
     print(f"группа не озвучилась ({failure}) — пробую её строки по одной", flush=True)
     pieces = []
     for position, ((_, segment), target) in enumerate(zip(group, targets)):
-        text = closed_phrase(target)
-        try:
-            pieces.append(guarded_generate(guard, model, mx, text, voice["instruct"],
-                                           seed + 104729 * (position + 1), args, reference))
+        words = len(re.findall(r"\w+", target.replace("\u0301", "")))
+        piece = None
+        for attempt, text in enumerate(spoken_variants(target) if words <= SKIPPABLE_WORDS
+                                       else [closed_phrase(target)]):
+            try:
+                piece = guarded_generate(guard, model, mx, text, voice["instruct"],
+                                         seed + 104729 * (position + 1) + 7 * attempt, args, reference)
+                if attempt:
+                    print(f"короткая реплика озвучилась в другой записи: «{text}»", flush=True)
+                break
+            except ValueError as exc:
+                if not str(exc).startswith(FAILED_TAKE):
+                    raise
+                if words > SKIPPABLE_WORDS:
+                    raise ValueError(f"{exc}; текст: «{target[:120]}»") from None
+        if piece is not None:
+            pieces.append(piece)
             continue
-        except ValueError as exc:
-            if not str(exc).startswith(FAILED_TAKE):
-                raise
-            words = len(re.findall(r"\w+", target.replace("\u0301", "")))
-            if words > SKIPPABLE_WORDS:
-                raise ValueError(f"{exc}; текст: «{target[:120]}»") from None
         sr = 24000
         silence = np.zeros(round(sr * 0.3), dtype=np.float32)
         metrics = audio_metrics(silence, sr)
