@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import math
 import shutil
 import sys
@@ -32,7 +33,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 RATE = 24000
-ATTEMPTS = 3                     # VoiceDesign вернул тишину или «проглотил» текст — другой seed
+ATTEMPTS = 4                     # VoiceDesign вернул тишину или «проглотил» текст — другой seed
+SHORTER = (80, 55, 35)          # образец длинный/медленный — следующая попытка с текстом не длиннее
+RESERVED = {"female": "other_voices_female", "male": "other_voices"}
 MAX_SAMPLE_SECONDS = 10.0        # длиннее: Base из такого образца срывается (тишина, проглоченный текст)
 
 
@@ -130,6 +133,22 @@ def plausible(samples, text: str) -> str:
     return ""
 
 
+def shorter(text: str, limit: int) -> str:
+    """Текст образца короче limit знаков: по концу предложения, иначе по слову — с точкой."""
+    if len(text) <= limit:
+        return text
+    ends = [m.end() for m in re.finditer(r"[.!?…](?:[»”\"])?(?=\s|$)", text) if 15 <= m.end() <= limit]
+    if ends:
+        return text[:max(ends)].strip()
+    words = text[:limit + 1].split(" ")
+    cut = " ".join(words[:-1]).strip(" ,;:—–") or text[:limit]
+    return cut.rstrip(".!?…") + "."
+
+
+class VoiceFailed(RuntimeError):
+    """Образец голоса не получился ни с одной попытки."""
+
+
 # ─────────────────────────────── создание пакета ───────────────────────────────
 def design(cast_path, pack_dir, model=None, mx=None, generate=None, design_model=None) -> Path:
     """Образцы всех героев из cast.json в pack_dir/voices. Готовые (тот же текст, инструкция,
@@ -163,22 +182,55 @@ def design(cast_path, pack_dir, model=None, mx=None, generate=None, design_model
         return hashlib.sha256(json.dumps([voice["sample_text"], instruct, seed], ensure_ascii=False).encode()).hexdigest()
 
     def make(voice, instruct, seed):
-        last = ""
+        """Образец голоса: (звук, seed, текст образца). Длинный или медленный образец — дальше с
+        более коротким текстом той же роли: медленная по описанию героиня на 120 знаках почти
+        всегда выходит за 10 с, и новый seed этого не лечит."""
+        last, text = "", voice["sample_text"]
         for attempt in range(ATTEMPTS):
             attempt_seed = seed + 1000 * attempt
-            samples = generate(voice["sample_text"], instruct, attempt_seed)
-            problem = plausible(samples, voice["sample_text"])
+            samples = generate(text, instruct, attempt_seed)
+            problem = plausible(samples, text)
             if not problem:
-                return samples, attempt_seed
+                return samples, attempt_seed, text
             last = problem
-            log(f"  образец «{voice['name']}»: {problem} — пробую другой seed")
-        raise RuntimeError(f"образец «{voice['name']}» не получился за {ATTEMPTS} попытки: {last}")
+            short = shorter(text, SHORTER[min(attempt, len(SHORTER) - 1)])
+            if ("длиннее" in problem or "медленно" in problem) and short != text:
+                text = short
+                log(f"  образец «{voice['name']}»: {problem} — пробую короче ({len(text)} знаков)")
+            else:
+                log(f"  образец «{voice['name']}»: {problem} — пробую другой seed")
+        raise VoiceFailed(f"образец «{voice['name']}» не получился за {ATTEMPTS} попытки: {last}")
 
-    def write(voice, samples, instruct, seed, note=""):
+    def hand_over(voice, reason):
+        """Голос не получился — его реплики читает запасной голос по полу («Прочие голоса»), а не
+        рушится весь пакет с уже готовыми героями. Не вышел и запасной — читает рассказчик."""
+        target = RESERVED.get(voice.get("gender"), RESERVED["male"])
+        if voice["id"] in RESERVED.values():
+            target = "narrator"
+        if target != "narrator" and not any(v["id"] == target for v in cast["voices"]):
+            female = target == RESERVED["female"]
+            cast["voices"].append({
+                "id": target, "name": "Прочие женские голоса" if female else "Прочие голоса",
+                "gender": "female" if female else "male", "lines": 0, "seed": int(voice.get("seed") or 17000) + 50000,
+                "sample_text": shorter(voice["sample_text"], SHORTER[0]),
+                "instruct": ("Neutral adult Russian " + ("female" if female else "male") + " voice, mid register, "
+                             "restrained clear diction. Calm natural conversational delivery. Say only the "
+                             "supplied text, no added sounds.")})
+        receiver = next(v for v in cast["voices"] if v["id"] == target)
+        receiver["lines"] = int(receiver.get("lines") or 0) + int(voice.get("lines") or 0)
+        for paragraph in cast.get("paragraphs") or []:
+            for span in paragraph.get("spans") or []:
+                if span.get("speaker") == voice["id"]:
+                    span["speaker"] = target
+        voice["dropped"] = True
+        dropped.append({"id": voice["id"], "name": voice["name"], "reason": reason, "given_to": receiver["name"]})
+        log(f"  голос «{voice['name']}» не получился ({reason}) — его реплики читает «{receiver['name']}»")
+
+    def write(voice, samples, instruct, seed, note="", text=None):
         wav = voices_dir / f"{voice['id']}.wav"
         sf.write(wav, samples, RATE, subtype="PCM_16")
         meta = {"id": voice["id"], "name": voice["name"], "gender": voice.get("gender"),
-                "ref_text": voice["sample_text"], "instruct": instruct, "seed": seed,
+                "ref_text": text or voice["sample_text"], "instruct": instruct, "seed": seed,
                 "signature": signature(voice, instruct, seed), "base_signature": signature(voice, voice["instruct"],
                                                                                         voice["seed"]),
                 "audio_seconds": round(len(samples) / RATE, 2),
@@ -187,9 +239,9 @@ def design(cast_path, pack_dir, model=None, mx=None, generate=None, design_model
                                                         encoding="utf-8")
         return meta
 
-    sounds, made = {}, []
-    for voice in cast["voices"]:
-        if voice.get("fixed"):
+    sounds, made, dropped = {}, [], []
+    for voice in cast["voices"]:                           # запасной голос, если понадобится, — в конце
+        if voice.get("fixed") or voice.get("dropped"):
             continue                                       # рассказчик — вшитый narrator.wav
         wav, meta_path = voices_dir / f"{voice['id']}.wav", voices_dir / f"{voice['id']}.json"
         if wav.is_file() and meta_path.is_file():
@@ -201,8 +253,12 @@ def design(cast_path, pack_dir, model=None, mx=None, generate=None, design_model
                 made.append(voice)
                 continue
         log(f"создаю голос «{voice['name']}» ({voice.get('lines', 0)} реплик)")
-        samples, seed = make(voice, voice["instruct"], voice["seed"])
-        sound = measure(samples, voice["sample_text"])
+        try:
+            samples, seed, text = make(voice, voice["instruct"], voice["seed"])
+        except VoiceFailed as exc:
+            hand_over(voice, str(exc).split(": ", 1)[-1])
+            continue
+        sound = measure(samples, text)
         twin = next((other for other in made if other.get("gender") == voice.get("gender")
                      and voice.get("gender") in ("male", "female") and twins(sound, sounds.get(other["id"]))), None)
         note, instruct = "", voice["instruct"]
@@ -211,21 +267,30 @@ def design(cast_path, pack_dir, model=None, mx=None, generate=None, design_model
             for step, higher in enumerate((True, False), 1):
                 candidate = redesigned(voice, higher)
                 log(f"  голос похож на «{twin['name']}» — новый вариант ({'выше' if higher else 'ниже'})")
-                other_samples, other_seed = make(voice, candidate, voice["seed"] + 7919 * step)
-                other_sound = measure(other_samples, voice["sample_text"])
+                try:
+                    other_samples, other_seed, other_text = make(voice, candidate, voice["seed"] + 7919 * step)
+                except VoiceFailed:
+                    continue                               # новый вариант не вышел — остаётся прежний
+                other_sound = measure(other_samples, other_text)
                 far = distance(other_sound, sounds[twin["id"]])
                 if best is None or far > best[0]:
-                    best = (far, other_samples, other_seed, candidate, other_sound)
+                    best = (far, other_samples, other_seed, candidate, other_sound, other_text)
                 if not twins(other_sound, sounds[twin["id"]]):
                     break
             if best and best[0] > distance(sound, sounds[twin["id"]]):
-                _, samples, seed, instruct, sound = best
+                _, samples, seed, instruct, sound, text = best
                 note = f"создан заново: звучал как «{twin['name']}»"
                 log(f"  оставлен новый вариант, отличие {best[0]:.1f} пт")
-        write(voice, samples, instruct, seed, note)
+        write(voice, samples, instruct, seed, note, text)
         sounds[voice["id"]] = sound
         made.append(voice)
-    log(f"✓ голоса готовы: {len(made)} (рассказчик — вшитый образец)")
+    if dropped:
+        # В пакете — разметка, по которой будут читать: реплики ушли запасному голосу.
+        cast["voices"] = [voice for voice in cast["voices"] if not voice.get("dropped")]
+        cast["dropped_voices"] = dropped
+        (pack / "cast.json").write_text(json.dumps(cast, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    log(f"✓ голоса готовы: {len(made)} (рассказчик — вшитый образец)"
+        + (f"; не получились и отданы запасным: {', '.join(d['name'] for d in dropped)}" if dropped else ""))
     return pack
 
 

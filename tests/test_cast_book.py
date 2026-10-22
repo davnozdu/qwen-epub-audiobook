@@ -260,6 +260,49 @@ class VoicePackTest(unittest.TestCase):
         voice_pack.design(self.cast_path, self.work / "pack2", generate=generate)
         self.assertEqual(seeds[:2], [17001, 18001])
 
+    def test_long_sample_is_retried_with_shorter_text(self):
+        # Медленная по описанию героиня: 120 знаков — больше 10 с; короче — укладывается.
+        long_text = ("Мальчики опять ушли к реке, хотя я сто раз просила их не ходить туда одних. "
+                     "Где же они, где же они теперь?")
+        self.cast["voices"][2]["sample_text"] = long_text
+        self.cast_path.write_text(json.dumps(self.cast, ensure_ascii=False), encoding="utf-8")
+        texts = []
+
+        def generate(text, instruct, seed):
+            texts.append(text)
+            seconds = len(text) / 9                     # ~9 знаков в секунду: медленно, но не «тишина»
+            return self.tone(200 if instruct == "A" else 330, seconds=seconds)
+
+        pack = voice_pack.design(self.cast_path, self.work / "pack-long", generate=generate)
+        meta = json.loads((pack / "voices" / "b.json").read_text(encoding="utf-8"))
+        self.assertLess(len(meta["ref_text"]), len(long_text))
+        self.assertTrue(long_text.startswith(meta["ref_text"].rstrip(".")[:30]))
+        self.assertLessEqual(meta["audio_seconds"], voice_pack.MAX_SAMPLE_SECONDS)
+        self.assertIn(long_text, texts)                   # сначала — как было, потом короче
+
+    def test_failed_voice_goes_to_reserve_and_pack_survives(self):
+        import numpy as np
+        self.cast["paragraphs"] = [{"id": "p1", "key": "k", "spans": [
+            {"start": 0, "end": 5, "speaker": "a"}, {"start": 6, "end": 9, "speaker": "b"}]}]
+        self.cast_path.write_text(json.dumps(self.cast, ensure_ascii=False), encoding="utf-8")
+
+        def generate(text, instruct, seed):
+            if instruct == "B":
+                return np.zeros(24000, dtype="float32")   # «Белла» не выходит ни с одной попытки
+            return self.tone(200 if instruct == "A" else 300)
+
+        pack = voice_pack.design(self.cast_path, self.work / "pack-fail", generate=generate)
+        cast = json.loads((pack / "cast.json").read_text(encoding="utf-8"))
+        ids = [voice["id"] for voice in cast["voices"]]
+        self.assertNotIn("b", ids)                                     # её нет в составе
+        self.assertIn("other_voices_female", ids)                      # её читает запасной женский
+        self.assertTrue((pack / "voices" / "a.wav").is_file())         # готовые голоса не потеряны
+        self.assertTrue((pack / "voices" / "other_voices_female.wav").is_file())
+        self.assertEqual([span["speaker"] for span in cast["paragraphs"][0]["spans"]],
+                         ["a", "other_voices_female"])
+        self.assertEqual(cast["dropped_voices"][0]["name"], "Белла")
+        voice_pack.open_pack(voice_pack.zip_pack(pack, self.work / "fail.zip"), self.work / "fail-open")
+
     def test_broken_pack_is_rejected(self):
         pack = voice_pack.design(self.cast_path, self.work / "pack3",
                                  generate=lambda text, instruct, seed: self.tone(150 + seed % 7 * 40))
