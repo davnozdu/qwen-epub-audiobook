@@ -669,6 +669,13 @@ def stage_synth(args, source, library, model_dir):
     report = json.loads((audio / "benchmark.json").read_text(encoding="utf-8"))
     print("состояние:", report.get("state"), "| звука:", round(report.get("final_audio_seconds", 0), 1), "с")
     assert report.get("state") == "complete", "прогон не завершён — запустите скрипт ещё раз, он продолжит"
+    skipped = [row for row in report.get("segments") or [] if row.get("skipped_text")]
+    if skipped:
+        # Кусок в одно-три слова не озвучился ни в склейке, ни отдельно — на его месте пауза.
+        warning = (f"⚠️ Не озвучилось и заменено паузой: {len(skipped)} — "
+                   + "; ".join(f"{row['segment_id']}: «{row['skipped_text']}»" for row in skipped[:5]))
+        print(warning, flush=True)
+        tg(warning)
     print("✓ синтез завершён")
     return audio
 

@@ -193,6 +193,69 @@ def fake_mlx(model):
 
 
 @unittest.skipIf(np is None, "numpy/soundfile нужны для синтеза")
+class SilentOn(FakeModel):
+    """Модель, которая сразу ставит конец (не возвращает звука) на тексте с любой из фраз."""
+
+    def __init__(self, *phrases):
+        super().__init__()
+        self.phrases = phrases
+
+    def generate(self, text, **options):
+        if any(phrase in text for phrase in self.phrases):
+            self.calls.append(text)
+            return
+        yield from super().generate(text, **options)
+
+
+@unittest.skipIf(np is None, "numpy/soundfile нужны для синтеза")
+class EmptyTakeTests(unittest.TestCase):
+    """Модель не вернула звука на всю склейку — книга не падает из-за короткой реплики."""
+
+    def setUp(self):
+        self.mx = SimpleNamespace(random=SimpleNamespace(seed=lambda value: None), synchronize=lambda: None)
+        self.args = SimpleNamespace(temperature=0.9, max_tokens=1024, rab_generation=True)
+        self.reference = {"ref_wave": np.zeros(SR, np.float32), "ref_text": "Образец."}
+        self.voice = {"instruct": ""}
+
+    def group(self, *texts):
+        return [(n, {"id": f"seg{n:06d}"}) for n, _ in enumerate(texts, 1)], list(texts)
+
+    def test_rows_one_by_one_rescue_the_group(self):
+        model = SilentOn("— Да. — Нет")                   # молчит только на склеенном тексте
+        group, targets = self.group("— Да.", "— Нет, — сказал он.")
+        pieces = q.rows_one_by_one(None, model, self.mx, group, targets, self.voice, 1, self.args,
+                                   self.reference, ValueError("Модель не вернула аудио"))
+        self.assertEqual(len(pieces), 2)
+        self.assertTrue(all(len(audio) > SR * 0.1 and "skipped_text" not in metrics
+                            for audio, sr, metrics in pieces))
+        self.assertIn("— Нет, — сказал он.", model.calls)
+
+    def test_short_line_that_never_sounds_becomes_a_pause_and_is_reported(self):
+        model = SilentOn("А?")
+        group, targets = self.group("— А?", "Она не ответила и отвернулась к окну.")
+        pieces = q.rows_one_by_one(None, model, self.mx, group, targets, self.voice, 1, self.args,
+                                   self.reference, ValueError("Модель не вернула аудио"))
+        (silence, _, skipped), (speech, _, spoken) = pieces
+        self.assertEqual(skipped.get("skipped_text"), "— А?")
+        self.assertAlmostEqual(len(silence) / SR, 0.3, delta=0.01)
+        self.assertNotIn("skipped_text", spoken)
+        self.assertGreater(len(speech), SR)
+
+    def test_long_line_that_never_sounds_still_stops_the_book(self):
+        model = SilentOn("отвернулась")
+        group, targets = self.group("Она не ответила и отвернулась к окну.")
+        with self.assertRaises(ValueError) as caught:
+            q.rows_one_by_one(None, model, self.mx, group, targets, self.voice, 1, self.args,
+                              self.reference, ValueError("Модель не вернула аудио"))
+        self.assertIn("отвернулась к окну", str(caught.exception))       # видно, какой текст
+
+    def test_chunk_without_speech_is_not_sent_to_the_model(self):
+        model = FakeModel()
+        audio, sr, metrics = q.generate_audio(model, self.mx, "Он ушёл.\n—", "", 1, self.args, self.reference)
+        self.assertEqual(model.calls, ["Он ушёл."])
+        self.assertGreater(len(audio), 0)
+
+
 class ClosedPhraseTests(unittest.TestCase):
     """Вызов модели кончается законченной фразой: на запятой модель обрывает последнее слово."""
 
@@ -428,6 +491,22 @@ class PipelineTests(unittest.TestCase):
             log = (folder / "audio/benchmark.json").read_text()
             self.assertIn('"regenerated_rows"', log)
             return reason
+
+    def test_group_without_sound_does_not_stop_the_book(self):
+        with tempfile.TemporaryDirectory() as folder:
+            folder, manifest, _ = self.build(folder, "sentence")
+            # Склейка с «Глава. Он вошёл» молчит целиком (строки по одной — звучат); «— Да.» молчит всегда.
+            model = SilentOn("Глава. Он вошёл", "— Да.")
+            self.render(folder, model)
+            timeline = json.loads((folder / "audio/timeline.json").read_text())["segments"]
+            self.assertEqual([r["segment_id"] for r in timeline], [s["id"] for s in manifest["segments"]])
+            self.assertIn("Глава.", model.calls)                      # строки первой склейки — по одной
+            report = json.loads((folder / "audio/benchmark.json").read_text())
+            self.assertEqual(report["state"], "complete")
+            skipped = [row for row in report["segments"] if row.get("skipped_text")]
+            self.assertEqual([row["skipped_text"] for row in skipped], ["— Да."])
+            spoken = [row for row in report["segments"] if not row.get("skipped_text")]
+            self.assertTrue(all(row["audio_seconds"] > 0.1 for row in spoken))
 
     def test_click_in_a_pause_is_retaken_not_filtered(self):
         self.check_flaw_retaken("click", "щелчок")

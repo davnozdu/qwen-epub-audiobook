@@ -629,6 +629,43 @@ def audio_metrics(audio, sr):
             "clipped_fraction": float(np.mean(np.abs(audio) >= 0.999))}
 
 
+SKIPPABLE_WORDS = 3          # не озвучилась и так — кусок не длиннее стольких слов заменяем паузой
+
+
+def rows_one_by_one(guard, model, mx, group, targets, voice, seed, args, reference, failure):
+    """Группа не дала звука ни с одного дубля — строки по одной, отдельными вызовами.
+
+    Модель иногда сразу ставит конец на всём тексте склейки (часто — на короткой реплике внутри
+    неё): другие границы текста это снимают. Строка не озвучилась и одна: в одно-три слова —
+    короткая пауза и предупреждение (книга не падает на 170-м сегменте из-за «— А?»); длиннее —
+    книга останавливается, как раньше: молча выкидывать текст нельзя.
+    """
+    import numpy as np
+    print(f"группа не озвучилась ({failure}) — пробую её строки по одной", flush=True)
+    pieces = []
+    for position, ((_, segment), target) in enumerate(zip(group, targets)):
+        text = closed_phrase(target)
+        try:
+            pieces.append(guarded_generate(guard, model, mx, text, voice["instruct"],
+                                           seed + 104729 * (position + 1), args, reference))
+            continue
+        except ValueError as exc:
+            if not str(exc).startswith(FAILED_TAKE):
+                raise
+            words = len(re.findall(r"\w+", target.replace("\u0301", "")))
+            if words > SKIPPABLE_WORDS:
+                raise ValueError(f"{exc}; текст: «{target[:120]}»") from None
+        sr = 24000
+        silence = np.zeros(round(sr * 0.3), dtype=np.float32)
+        metrics = audio_metrics(silence, sr)
+        metrics.update(synthesis_seconds=0.0, raw_audio_seconds=0.3, audio_tokens=0, rtf=0.0,
+                       realtime_speed=0.0, skipped_text=target)
+        print(f"⚠️ не озвучилось даже отдельно, пропущено ({words} сл.): «{target}» — {segment['id']}",
+              flush=True)
+        pieces.append((silence, sr, metrics))
+    return pieces
+
+
 def generate_audio(model, mx, text, instruct, seed, args, reference=None):
     import numpy as np
     if not any(c.isalnum() for c in text):
@@ -653,6 +690,8 @@ def generate_audio(model, mx, text, instruct, seed, args, reference=None):
         chunks = rab_chunks(text, limit) if getattr(args, "rab_generation", False) else [text]
         results = []
         for index, chunk in enumerate(chunks):
+            if not any(c.isalnum() for c in chunk):
+                continue                         # «—», «»», «…» отдельным куском — не речь: модели не отдаём
             mx.random.seed(seed + index)
             parts = list(model.generate(text=chunk, **clone_options(reference, args, mx)))
             if not parts:
@@ -878,13 +917,20 @@ def _render(args, temporary_library=None):
             if cached and guard is not None and "letters_per_second" in pieces[0][2]:
                 guard.rates.append(float(pieces[0][2]["letters_per_second"]))  # и типичный темп
             if not cached:
-                audio, sr, metrics = guarded_generate(guard, model, mx, group_text(group, targets), voice["instruct"],
-                                                      seed, args, reference)
-                if len(group) == 1:
-                    pieces = [(audio, sr, metrics)]
+                try:
+                    audio, sr, metrics = guarded_generate(guard, model, mx, group_text(group, targets),
+                                                          voice["instruct"], seed, args, reference)
+                except ValueError as exc:
+                    if not str(exc).startswith(FAILED_TAKE):
+                        raise
+                    pieces = rows_one_by_one(guard, model, mx, group, targets, voice, seed, args, reference, exc)
                 else:
-                    parts = split_group_audio(audio, sr, [spoken_weight(text) for text in targets])
-                    pieces = [(part, sr, share_metrics(metrics, part, sr, len(audio), len(group))) for part in parts]
+                    if len(group) == 1:
+                        pieces = [(audio, sr, metrics)]
+                    else:
+                        parts = split_group_audio(audio, sr, [spoken_weight(text) for text in targets])
+                        pieces = [(part, sr, share_metrics(metrics, part, sr, len(audio), len(group)))
+                                  for part in parts]
                 for (_, s), wav, signature, target_text, (audio, sr, metrics) in zip(group, wavs, signatures, targets, pieces):
                     sf.write(wav, audio, sr, subtype="PCM_16")
                     save(wav.with_suffix(".json"), {"signature": signature, "text": s["text"], "speaker": s["speaker"],
