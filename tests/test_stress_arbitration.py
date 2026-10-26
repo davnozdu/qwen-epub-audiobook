@@ -37,6 +37,53 @@ class ArbitrationTest(unittest.TestCase):
         self.assertEqual(result['segments'][0]['speaker'], 'narrator')
         self.assertEqual(m['segments'][0]['tts_text'], 'Она́ бы́ла. По́том зво́нит.')
 
+    def label_of(self, rows, word):
+        return next(k for k, v in rows[0]['candidates'].items() if v == word)
+
+    def test_final_pick_in_reason_wins_over_choice(self):
+        # «Идиот», часть 16: модель ставила choice, а в reason передумывала («пи́сать»: «…Нет, норма
+        # писАть. Выбираю B.»). В текст шёл неверный вариант. Итог рассуждения — последнее слово.
+        m = fixture(); rows = a.disputes(m)
+        wrong, right = self.label_of(rows, 'бы́ла'), self.label_of(rows, 'была́')
+        for reason in (f'бЫла? Нет, норма былА. Выбираю {right}.',
+                       f'для TTS нужно выбрать явное ударение — {right}.',
+                       f'выбираем {wrong}? нет — произносится былА; {right} верно'):
+            result, audit = a.apply(m, rows, {'decisions': [{'id': rows[0]['id'], 'choice': wrong,
+                                                             'reason': reason}]})
+            self.assertEqual(result['segments'][0]['tts_text'], 'Она́ была́. По́том зво́нит.', reason)
+            self.assertEqual(audit[0]['choice'], right)
+            self.assertIn('contradiction', audit[0])
+
+    def test_stress_named_in_reason_against_choice_keeps_hybrid(self):
+        # «предложил — ударение на И: предложИл», а выбран предло́жил: какой вариант верный, неясно —
+        # слово остаётся как у гибрида, а не как в противоречивом ответе.
+        m = fixture(); rows = a.disputes(m)
+        hybrid = m['segments'][0]['tts_text']
+        wrong = self.label_of(rows, 'была́')
+        result, audit = a.apply(m, rows, {'decisions': [{'id': rows[0]['id'], 'choice': wrong,
+                                                         'reason': 'ударение на первом слоге: бЫла'}]})
+        self.assertEqual(result['segments'][0]['tts_text'], hybrid)
+        self.assertEqual(audit[0]['choice'], 'unknown')
+
+    def test_stressed_letter_in_reason_against_choice_keeps_hybrid(self):
+        # «Дюбарри — ударение на И», а выбран Дю́барри.
+        row = {'candidates': {'A': 'Дю́барри', 'B': 'Дюбарри́'}}
+        self.assertEqual(a.reconcile(row, {'choice': 'A', 'reason': 'Дюбарри — ударение на И'})[0], 'unknown')
+        self.assertEqual(a.reconcile(row, {'choice': 'B', 'reason': 'Дюбарри — ударение на И'})[0], 'B')
+        self.assertEqual(a.reconcile(row, {'choice': 'A', 'reason': 'ударение на первом слоге'})[0], 'A')
+
+    def test_consistent_reason_is_kept(self):
+        m = fixture(); rows = a.disputes(m)
+        right = self.label_of(rows, 'была́')
+        result, audit = a.apply(m, rows, {'decisions': [{'id': rows[0]['id'], 'choice': right,
+                                                         'reason': 'былА — прошедшее время, не бЫла'}]})
+        self.assertEqual(result['segments'][0]['tts_text'], 'Она́ была́. По́том зво́нит.')
+        self.assertNotIn('contradiction', audit[0])
+
+    def test_prompt_asks_reason_before_choice(self):
+        prompt = a.prompt_for(a.disputes(fixture()))
+        self.assertLess(prompt.index('"reason"'), prompt.index('"choice":'))
+
     def test_unknown_keeps_hybrid(self):
         m = fixture(); rows = a.disputes(m)
         result, _ = a.apply(m, rows, {'decisions': [{'id': rows[0]['id'], 'choice': 'unknown', 'reason': 'Не уверен'}]})

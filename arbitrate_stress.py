@@ -2,6 +2,7 @@
 from collections import defaultdict
 from copy import deepcopy
 import json
+import re
 from pathlib import Path
 from prepare_silero import VOWELS, WORD
 from prepare_qwen import digest, obtain
@@ -65,10 +66,77 @@ def prompt_for(rows):
 Не выбирай отсутствие отметки просто потому, что она необязательна в письме:
 мы готовим произношение для TTS. Если не уверен (особенно имя собственное),
 выбери unknown. Не выдумывай третье ударение, не исправляй слова, не добавляй
-текст. Возвращай ТОЛЬКО JSON {"decisions":[{"id":"d00001","choice":"A",
-"reason":"краткая причина"}]}. Каждый переданный id ровно один раз.
-choice строго A, B или unknown. Нельзя вернуть полный текст книги.
+текст. Сначала reason: коротко, почему, и в конце — выбранное слово с прописной
+ударной гласной (как в display). Потом choice — ТОТ ЖЕ вариант, что в reason;
+не передумывай после выбора. Возвращай ТОЛЬКО JSON {"decisions":[{"id":"d00001",
+"reason":"краткая причина: писАть","choice":"B"}]}. Каждый переданный id ровно
+один раз. choice строго A, B или unknown. Нельзя вернуть полный текст книги.
 ''' + json.dumps(payload, ensure_ascii=False)
+
+
+# Итог рассуждения в reason: «Выбираю B», «вариант B», «ответ: B», «… — B.» в конце, «B верно».
+# Кириллические А/В — только после слова-ключа: иначе «В тексте…» сошло бы за выбор.
+PICKS = [re.compile(r'(?i:выбира\w*|выбор|вариант|ответ)\s*:?\s*([ABАВ])(?![\w\u0301])'),
+         re.compile(r'[—–-]\s*([AB])\s*\.?\s*$'),
+         re.compile(r'(?<![\w\u0301])([AB])\s+(?:верн|правильн)')]
+
+
+def final_pick(reason):
+    """Последний явный выбор в reason (A/B) или None. Модель иногда ставит choice, а в причине
+    передумывает: «пИсать? Нет, норма писАть. Выбираю B» при choice A."""
+    found = []
+    for pattern in PICKS:
+        found += [(m.start(1), m.group(1)) for m in pattern.finditer(reason)]
+    if not found:
+        return None
+    return {'А': 'A', 'В': 'B'}.get(max(found)[1], max(found)[1])
+
+
+def stresses_named(reason, candidates):
+    """Какие варианты reason называет буквально в виде display (ударная прописная): {'A', 'B'}."""
+    tokens = set(re.findall(r'[а-яёА-ЯЁ]+', reason.replace('-', '')))
+    named = set()
+    for label, word in candidates.items():
+        display = describe(word)['display'].replace('-', '')
+        if display != display.lower() and display in tokens:
+            named.add(label)
+    return named
+
+
+STRESS_LETTER = re.compile(r'ударени\w*\s+на\s+[«"\']?([аеёиоуыэюя])[»"\']?(?![а-яё])', re.I)
+
+
+def stressed_vowel(word):
+    """Ударная гласная варианта (строчная) или None, если отметки нет."""
+    for index, char in enumerate(word):
+        if index + 1 < len(word) and word[index + 1] == '\u0301':
+            return char.lower()
+    return 'ё' if 'ё' in word.lower() else None
+
+
+def stresses_by_letter(reason, candidates):
+    """«ударение на И» — какие варианты так ударены. Буква должна отличать один вариант от другого."""
+    letters_named = {m.group(1).lower() for m in STRESS_LETTER.finditer(reason)}
+    vowels = {label: stressed_vowel(word) for label, word in candidates.items()}
+    if len(letters_named) != 1 or len(set(vowels.values())) < 2:
+        return set()
+    return {label for label, vowel in vowels.items() if vowel in letters_named}
+
+
+def reconcile(row, decision):
+    """Выбор, согласованный с причиной. Явный итог в reason — главный; иначе если reason называет
+    ударение только другого варианта — неясно, кто прав: unknown, слово остаётся как у гибрида."""
+    choice, reason = decision['choice'], decision['reason']
+    if choice == 'unknown':
+        return choice, ''
+    pick = final_pick(reason)
+    if pick and pick != choice:
+        return pick, f'choice {choice}, но в причине итог {pick}'
+    if not pick:
+        named = stresses_named(reason, row['candidates']) or stresses_by_letter(reason, row['candidates'])
+        if named and choice not in named:
+            return 'unknown', f'choice {choice}, а причина называет ударение варианта {"/".join(sorted(named))}'
+    return choice, ''
 
 
 def validate(rows, data):
@@ -103,10 +171,13 @@ def apply(manifest, rows, decisions):
         words = list(WORD.finditer(segment['tts_text']))
         match = words[row['word_index']]
         before = match.group()
-        after = before if decision['choice'] == 'unknown' else row['candidates'][decision['choice']]
+        choice, contradiction = reconcile(row, decision)
+        after = before if choice == 'unknown' else row['candidates'][choice]
         segment['tts_text'] = segment['tts_text'][:match.start()] + after + segment['tts_text'][match.end():]
+        extra = {'contradiction': contradiction} if contradiction else {}
         audit.append(dict(id=row['id'], segment_id=row['segment_id'], word_index=row['word_index'],
-                          before=before, after=after, candidates=row['candidates'], **{k:v for k,v in decision.items() if k!='id'}))
+                          before=before, after=after, candidates=row['candidates'],
+                          **{k:v for k,v in decision.items() if k!='id'}, **extra) | {'choice': choice})
     for s in result['segments']:
         previous = before_by_id[s['id']]
         if letters(previous) != letters(s['tts_text']):
