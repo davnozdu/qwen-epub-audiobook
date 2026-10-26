@@ -240,6 +240,26 @@ class GlueTests(unittest.TestCase):
             # Часть отдаётся как есть: громкость и музыка не трогались.
             self.assertFalse((WORK / "glue-part" / "audio-normalized").exists())
 
+    @unittest.skipUnless(pathlib.Path(a.FFMPEG).exists(), "нужен ffmpeg")
+    def test_part_ignores_gaps_in_other_parts(self):
+        # «Идиот», 51 часть: в томе уже лежали part-26 и part-44, а собиралась часть 16. Сборка части
+        # проверяла нумерацию ВСЕХ частей, падала «нумерация частей с дыркой», и часть 16 заново
+        # озвучивалась на следующем аккаунте — по кругу два дня. Части нужна только она сама.
+        with parts_book() as (root, book, _seconds):
+            shutil.copytree(root / "part-2", root / "part-5")
+            (root / "part-7").mkdir()                     # недораспакованная чужая часть — тоже не помеха
+            out = WORK / "results-gap"
+            done = glue("--mode", "part", "--part", 2, "--parts-dir", root, "--out", out,
+                        "--work", WORK / "glue-gap", "--name", "chast-2")
+            self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
+            self.assertTrue((out / "chast-2.zip").is_file(), list(out.iterdir()))
+            # Книга целиком с дыркой по-прежнему не собирается.
+            shutil.rmtree(root / "part-7")
+            final = glue("--mode", "final", "--parts-dir", root, "--book", book,
+                         "--out", WORK / "results-gap-final", "--work", WORK / "glue-gap-final")
+            self.assertNotEqual(final.returncode, 0)
+            self.assertIn("нумерация частей с дыркой", final.stdout + final.stderr)
+
     def test_seam_mismatch_stops_the_assembly(self):
         with parts_book() as (root, book, _seconds):
             prepared = root / "part-2" / "project" / "source" / "manifest.json"

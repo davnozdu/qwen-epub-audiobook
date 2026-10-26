@@ -80,10 +80,18 @@ def part_dirs(parts_dir) -> list:
     return found
 
 
-def check_parts(parts_dir, expect: int = 0) -> list:
-    """Проверяет, что части на месте и полные, и возвращает их описание."""
+def check_parts(parts_dir, expect: int = 0, only: int = 0) -> list:
+    """Проверяет, что части на месте и полные, и возвращает их описание.
+
+    only — сборка одной части: проверяем только её. Остальные папки в томе ей не помеха: части
+    приходят не строго по порядку (повтор, «продолжить»), и «дырка» в нумерации ронял сборку
+    готовой части — её снова озвучивали на следующем аккаунте, по кругу. Сплошная нумерация
+    нужна только книге целиком.
+    """
     parts = []
     for index, folder in part_dirs(parts_dir):
+        if only and index != only:
+            continue
         item = {"index": index, "folder": folder,
                 "project": folder / "project" / "manifest.json",
                 "source_json": folder / "project" / "source.json",
@@ -97,6 +105,10 @@ def check_parts(parts_dir, expect: int = 0) -> list:
         if missing:
             raise SystemExit(f"часть {index} неполная: нет {', '.join(missing)} в {folder}")
         parts.append(item)
+    if only:
+        if not parts:
+            raise SystemExit(f"части {only} нет в {parts_dir}")
+        return parts
     if not parts:
         raise SystemExit(f"в {parts_dir} нет ни одной части (ожидались part-1, part-2, …)")
     if [item["index"] for item in parts] != list(range(1, len(parts) + 1)):
@@ -518,10 +530,7 @@ def main() -> int:
     work = pathlib.Path(args.work) if args.work else parts_dir / "glue"
     work.mkdir(parents=True, exist_ok=True)
     if args.mode == "part":
-        wanted = [item for item in check_parts(parts_dir, 0) if not args.part or item["index"] == args.part]
-        if not wanted:
-            raise SystemExit(f"части {args.part} нет в {parts_dir}")
-        return mode_part(wanted, work, args.out, args.name)
+        return mode_part(check_parts(parts_dir, 0, only=args.part), work, args.out, args.name)
     return mode_final(check_parts(parts_dir, args.expect), work, args.out, args.book, args.polish,
                       args.name)
 
