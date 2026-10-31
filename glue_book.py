@@ -459,7 +459,7 @@ def mode_part(parts: list, work, out, name: str = "") -> int:
     return 0
 
 
-def mode_final(parts: list, work, out, book, polish: str, name: str = "") -> int:
+def mode_final(parts: list, work, out, book, polish: str, name: str = "", stereo: str = "mono") -> int:
     """Финал: склейка частей, один прогон громкости и музыки на всю книгу, сборка."""
     banner(f"Финал: склеиваю {len(parts)} части в одну книгу")
     meta = book_meta(book)
@@ -503,16 +503,24 @@ def mode_final(parts: list, work, out, book, polish: str, name: str = "") -> int
     run_step("Музыка: одна подложка на всю книгу",
              [sys.executable, REPO / "mix_book_music.py", "--audio-dir", normalized,
               "--out", music, "--volume-percent", "5"])
+    # Стерео — только если выбрано в настройках: моно-исходник расширяется эффектом Хааса.
+    # Настоящего стерео в синтезе нет, поэтому это объём, а не «качество из ниоткуда».
+    audio_for_book = music
+    if stereo == "space":
+        run_step("Стерео: объём (Хаас, громкость и тайминг сохраняются)",
+                 [sys.executable, REPO / "widen_book_audio.py", "--audio-dir", music,
+                  "--out", work / "audio-stereo"])
+        audio_for_book = work / "audio-stereo"
     run_step("Сборка m4b и read-along.epub",
              [sys.executable, REPO / "audiobook_epub.py", "package",
-              "--manifest", prepared_dir / "source" / "manifest.json", "--audio-dir", music,
+              "--manifest", prepared_dir / "source" / "manifest.json", "--audio-dir", audio_for_book,
               "--out", work / "result"])
     base = name or (pathlib.Path(book).stem if book else "") or file_safe(whole["book"]["title"], "книга")
     archive = pack_result(work / "result", out, base, whole["book"]["title"])
     save(pathlib.Path(parts[0]["folder"]).parent / "glue.json",
          {"book": str(book), "title": whole["book"]["title"], "parts": len(parts),
-          "segments": count, "seconds": total, "polish": polish, "archive": archive.name,
-          "finished": __import__("time").time()})
+          "segments": count, "seconds": total, "polish": polish, "stereo": stereo,
+          "archive": archive.name, "finished": __import__("time").time()})
     print(f"\nкнига собрана: {archive.name}  ({total / 3600:.2f} ч звука, частей {len(parts)})")
     print("сырьё частей осталось на месте: фильтр, громкость и музыку можно переделать и "
           "собрать заново, не трогая облако")
@@ -529,6 +537,8 @@ def main() -> int:
     parser.add_argument("--book", default="", help="исходный epub целиком (название, автор)")
     parser.add_argument("--polish", choices=["soft", "off"], default="soft",
                         help="мягкая обработка речи при выравнивании (off — только громкость)")
+    parser.add_argument("--stereo", choices=["mono", "space"], default="mono",
+                        help="mono — как есть; space — стерео-объём (Хаас) при сборке книги")
     parser.add_argument("--work", default="", help="рабочий каталог сборки (по умолчанию в --parts-dir)")
     parser.add_argument("--expect", type=int, default=0, help="сколько частей ждём")
     parser.add_argument("--name", default="", help="имя архива без пробелов (обычно имя файла книги)")
@@ -548,7 +558,7 @@ def main() -> int:
     if args.mode == "part":
         return mode_part(check_parts(parts_dir, 0, only=args.part), work, args.out, args.name)
     return mode_final(check_parts(parts_dir, args.expect), work, args.out, args.book, args.polish,
-                      args.name)
+                      args.name, args.stereo)
 
 
 if __name__ == "__main__":

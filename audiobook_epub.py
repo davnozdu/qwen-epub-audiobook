@@ -439,10 +439,19 @@ def package(manifest_path, audio_dir, out):
             # есть, остальные форматы перекодируем в JPEG.
             codec = "copy" if cover["media_type"] in {"image/jpeg", "image/png"} else "mjpeg"
             artwork = ["-i", str(cover_file), "-map", "2:v:0", "-c:v", codec, "-disposition:v:0", "attached_pic"]
+        # Стерео-дорожка при той же общей скорости отдаёт каналу вдвое меньше бит, поэтому
+        # двухканальную книгу кодируем с запасом; моно на 24 кГц и 128k — уже с головой.
+        channels = 1
+        try:
+            import soundfile as sf
+            channels = sf.info(str(audio_dir / "sample.wav")).channels
+        except Exception:
+            pass
+        bitrate = "176k" if channels == 2 else "128k"
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(audio_dir / "sample.wav"),
             "-f", "ffmetadata", "-i", str(meta), *artwork[:2], "-map", "0:a:0", *artwork[2:],
             "-map_metadata", "1", "-map_chapters", "1",
-            "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-f", "mp4", str(temp_m4b)], check=True)
+            "-c:a", "aac", "-b:a", bitrate, "-movflags", "+faststart", "-f", "mp4", str(temp_m4b)], check=True)
         probe = json.loads(subprocess.check_output([FFPROBE, "-v", "error", "-show_format", "-show_streams", "-show_chapters", "-of", "json", str(temp_m4b)]))
         if cover_file is not None and not any(s.get("disposition", {}).get("attached_pic") for s in probe["streams"]):
             raise ValueError("Обложка не попала в M4B")

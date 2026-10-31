@@ -260,6 +260,26 @@ class GlueTests(unittest.TestCase):
             self.assertNotEqual(final.returncode, 0)
             self.assertIn("нумерация частей с дыркой", final.stdout + final.stderr)
 
+    @unittest.skipUnless(pathlib.Path(a.FFMPEG).exists(), "нужен ffmpeg")
+    def test_stereo_setting_makes_two_channel_book(self):
+        """Настройка «стерео-объём»: книга собирается в два канала, длительность та же."""
+        with parts_book() as (root, book, seconds):
+            out = WORK / "results-stereo"
+            done = glue("--mode", "final", "--parts-dir", root, "--book", book, "--out", out,
+                        "--work", WORK / "glue-stereo", "--expect", 2, "--name", "kniga-stereo",
+                        "--stereo", "space")
+            self.assertEqual(done.returncode, 0, done.stdout[-4000:] + done.stderr[-2000:])
+            with zipfile.ZipFile(out / "kniga-stereo.zip") as zf:
+                zf.extractall(WORK / "extracted-stereo")
+            probe = json.loads(subprocess.check_output(
+                [a.FFPROBE, "-v", "error", "-show_streams", "-show_format", "-of", "json",
+                 str(WORK / "extracted-stereo" / "Книга целиком.m4b")]))
+            audio = [item for item in probe["streams"] if item.get("codec_type") == "audio"][0]
+            self.assertEqual(audio["channels"], 2)
+            self.assertAlmostEqual(float(probe["format"]["duration"]), sum(seconds), delta=0.3)
+            glued = json.loads((root / "glue.json").read_text(encoding="utf-8"))
+            self.assertEqual(glued["stereo"], "space")
+
     def test_seam_mismatch_stops_the_assembly(self):
         with parts_book() as (root, book, _seconds):
             prepared = root / "part-2" / "project" / "source" / "manifest.json"
