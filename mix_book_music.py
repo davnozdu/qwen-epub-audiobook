@@ -9,6 +9,9 @@ import subprocess
 import tempfile
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
+
+import audio_limits                                      # noqa: E402  предел WAV в 4 ГиБ
+
 FIRST_TRACK = {'file': 'Lamplight_and_Paper.mp3', 'title': 'Свет лампы и страницы',
                'size': 4247943, 'sha256': 'f1048274fd167a826b18b94f52782d89848606e21719deb835e5bde75e42bba2'}
 
@@ -54,7 +57,8 @@ def mix(source, out, music, percent=5):
         mixed = Path(temporary) / 'mixed.wav'
         subprocess.run([FFMPEG, '-hide_banner', '-loglevel', 'error', '-y',
                         '-i', str(source / 'sample.wav'), '-stream_loop', '-1', '-i', str(music),
-                        '-filter_complex', filters, '-map', '[mixed]', '-c:a', 'pcm_f32le', str(mixed)], check=True)
+                        '-filter_complex', filters, '-map', '[mixed]', '-c:a', 'pcm_f32le',
+                        '-rf64', 'auto', str(mixed)], check=True)
         got = sf.info(mixed)
         if (got.frames, got.samplerate, got.channels) != (info.frames, info.samplerate, info.channels):
             raise ValueError('Наложение музыки изменило длительность/формат речи')
@@ -67,7 +71,8 @@ def mix(source, out, music, percent=5):
         if peak >= 1:
             raise ValueError('Сумма речи и музыки перегружена: сначала нормализуйте речь с запасом по пикам')
         with sf.SoundFile(mixed) as reader, sf.SoundFile(out / 'sample.wav', 'w', samplerate=info.samplerate,
-                                                       channels=1, subtype='PCM_16') as writer:
+                                                       channels=1, subtype='PCM_16',
+                                                       format=audio_limits.wav_format(info.frames, 2)) as writer:
             for block in reader.blocks(blocksize=65536, dtype='float32'):
                 writer.write(block)
     shutil.copyfile(source / 'timeline.json', out / 'timeline.json')

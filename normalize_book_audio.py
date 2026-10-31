@@ -11,6 +11,8 @@ import tempfile
 
 FFMPEG = shutil.which("ffmpeg") or "/opt/homebrew/bin/ffmpeg"
 
+import audio_limits                                      # noqa: E402  предел WAV в 4 ГиБ
+
 # Мягкая обработка финальной речи — «полировка»: де-эссер снимает свист на «с/ш/ч», afftdn —
 # зернистость вокодера, полка −3 дБ выше 7 кГц убирает стеклянный призвук. Цепочка выбрана
 # прослушиванием на реальной книге (из шести вариантов: полка −5 дБ, шумоподавление, срез 8 кГц,
@@ -39,7 +41,11 @@ def gains_for(measurements, requested=-20.0, peak_limit=-1.5):
 def pool(rows, folder, path, sr):
     import numpy as np
     import soundfile as sf
-    with sf.SoundFile(path, "w", samplerate=sr, channels=1, subtype="FLOAT") as writer:
+    # RF64 всегда: пул главного чтеца на длинной книге перерастает 4 ГиБ, а в WAV заголовок
+    # обрезал бы длительность, и громкость мерилась бы по куску. Читает этот файл только
+    # ffmpeg (measure), он RF64 понимает. `wave` его не читает — не использовать.
+    with sf.SoundFile(path, "w", samplerate=sr, channels=1, subtype="FLOAT",
+                      format="RF64") as writer:
         for row in rows:
             with sf.SoundFile(folder / "segments" / (row["segment_id"] + ".wav")) as reader:
                 if reader.samplerate != sr or reader.channels != 1:
@@ -50,10 +56,8 @@ def pool(rows, folder, path, sr):
 
 
 def wav_shape(path):
-    """Кадры/частота/каналы WAV из заголовка: длительность сверяем точно, без внешних библиотек."""
-    import wave
-    with wave.open(str(path), "rb") as handle:
-        return handle.getnframes(), handle.getframerate(), handle.getnchannels()
+    """Кадры/частота/каналы дорожки. Через soundfile, а не `wave`: дороже 4 ГиБ — RF64."""
+    return audio_limits.shape(path)
 
 
 def polish(path, target, peak_limit, filter_chain=POLISH_FILTER):
@@ -68,7 +72,8 @@ def polish(path, target, peak_limit, filter_chain=POLISH_FILTER):
     with tempfile.TemporaryDirectory(prefix="book-polish-") as temporary:
         filtered = Path(temporary) / "filtered.wav"
         subprocess.run([FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(path),
-                        "-af", filter_chain, "-c:a", "pcm_s16le", str(filtered)], check=True)
+                        "-af", filter_chain, "-c:a", "pcm_s16le", "-rf64", "auto",
+                        str(filtered)], check=True)
         if wav_shape(filtered) != shape:
             raise ValueError("Мягкая обработка изменила длительность или формат дорожки")
         measured = measure(filtered)
@@ -79,7 +84,7 @@ def polish(path, target, peak_limit, filter_chain=POLISH_FILTER):
         command = [FFMPEG, "-hide_banner", "-loglevel", "error", "-y", "-i", str(filtered)]
         if abs(gain) >= 0.05:
             command += ["-af", f"volume={gain:.2f}dB"]
-        command += ["-c:a", "pcm_s16le", str(final)]
+        command += ["-c:a", "pcm_s16le", "-rf64", "auto", str(final)]
         subprocess.run(command, check=True)
         if wav_shape(final) != shape:
             raise ValueError("Возврат громкости изменил длительность дорожки")
@@ -134,7 +139,8 @@ def normalize(source, out, target=-20.0, peak_limit=-1.5, polish_mode="soft"):
         # Read original montage, apply the same role gain in its exact frame
         # intervals. Never resample, stretch, trim or rebuild timing from floats.
         with sf.SoundFile(source / "sample.wav") as reader, sf.SoundFile(
-                out / "sample.wav", "w", samplerate=info.samplerate, channels=1, subtype="PCM_16") as writer:
+                out / "sample.wav", "w", samplerate=info.samplerate, channels=1, subtype="PCM_16",
+                format=audio_limits.wav_format(info.frames, 2)) as writer:
             rows = timeline["segments"]
             for index, row in enumerate(rows):
                 stop = round(rows[index + 1]["audio_start"] * info.samplerate) if index + 1 < len(rows) else info.frames

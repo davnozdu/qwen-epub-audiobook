@@ -47,6 +47,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "colab" / "cli"))
 
 import audiobook_epub                                    # noqa: E402
+import audio_limits                                      # noqa: E402  предел WAV в 4 ГиБ
 from qwen_tts_book import file_safe                      # noqa: E402  правило имён одно на весь конвейер
 
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
@@ -149,7 +150,12 @@ def build_sample(audio_dir, destination, total: float) -> None:
     info = sf.info(str(next(iter(files.values()))))
     rate = info.samplerate
     frame_count = round(total * rate)
-    with sf.SoundFile(str(destination), "w", samplerate=rate, channels=1, subtype="PCM_16") as writer:
+    # Дорожка книги длиннее ≈24.8 ч (24 кГц/16 бит) в обычный WAV не влезает: данные пишутся
+    # целиком, а в заголовке остаётся 0xFFFFFFFF байт, и проверка ниже видит обрезанную
+    # длительность. Такие дорожки пишем как RF64 — звук тот же, размер 64-битный.
+    fmt = audio_limits.wav_format(frame_count, 2)
+    with sf.SoundFile(str(destination), "w", samplerate=rate, channels=1, subtype="PCM_16",
+                      format=fmt) as writer:
         cursor = 0
         for row in rows:
             begin = round(float(row["audio_start"]) * rate)
@@ -171,8 +177,13 @@ def build_sample(audio_dir, destination, total: float) -> None:
             writer.write(np.zeros(block, dtype="float32"))
             cursor += block
     actual = sf.info(str(destination))
-    if abs(actual.duration - total) > 2 / actual.samplerate:
-        raise SystemExit(f"дорожка книги вышла {actual.duration:.3f} с вместо {total:.3f} с")
+    if actual.frames != frame_count:
+        raise SystemExit(
+            f"дорожка книги вышла {actual.frames} кадров ({actual.duration:.3f} с) вместо "
+            f"{frame_count} ({total:.3f} с), формат {fmt}"
+            + (": дорожка не влезла в 4 ГиБ — её надо писать как RF64"
+               if fmt == "WAV" and audio_limits.too_big(frame_count, 2) else
+               ": формат не удержал запись целиком"))
 
 
 # ───────────────────────── склейка манифестов частей ─────────────────────────
@@ -529,6 +540,11 @@ def main() -> int:
     parts_dir = pathlib.Path(args.parts_dir)
     work = pathlib.Path(args.work) if args.work else parts_dir / "glue"
     work.mkdir(parents=True, exist_ok=True)
+    # Промежуточные дорожки шагов (громкость, полировка, музыка) весят по 4–8 ГБ: на книге в
+    # 25 ч это легко переполняет /tmp контейнера. Кладём их рядом с сырьём, в том.
+    temporary = work / "tmp"
+    temporary.mkdir(parents=True, exist_ok=True)
+    os.environ["TMPDIR"] = str(temporary)
     if args.mode == "part":
         return mode_part(check_parts(parts_dir, 0, only=args.part), work, args.out, args.name)
     return mode_final(check_parts(parts_dir, args.expect), work, args.out, args.book, args.polish,
